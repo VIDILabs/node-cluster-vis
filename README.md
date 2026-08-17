@@ -14,49 +14,48 @@
 
 ### Setup
 
-1. `cd ui`
-2. `npm install`
+1. Open a terminal
+2. Run `cd ui`
+3. Ensure Node 24+ is active:
+   1. NVM: `nvm use 24` or `nvm install 24` if not installed
+4. `npm install`
 
 ### Usage
 
-1. `cd ui`
-2. `npm run start`
+1. Open terminal
+2. `cd ui`
+3. `npm run start`
 
 ## Backend (Flask)
 
 ### Setup
 
-1. `cd server`
-2. Ensure you're using Python 3.13. If you have `pyenv` installed, it should automatically switch Python versions when you `cd` into `server/`.
-3. `python -m venv .venv`
-4. `source .venv/bin/activate` (Repeat this whenever you start a new terminal)
-5. `pip install -r requirements.txt`
-6. Install CCPCA package
-   1. Download ccpca repo as zip from [https://github.com/takanori-fujiwara/ccpca](https://github.com/takanori-fujiwara/ccpca):
-   2. Download ccpca repo as zip
-   3. Unzip in `/server`
-   4. `cd ccpca-master`
-   5. If you're on MacOS and use Homebrew, update the path to Eigen on lines 46 and 50 `/ccpca-master/ccpca/presetup.py` as follows:
+1. Open a second terminal
+2. Run `cd server`
+3. Ensure you're using Python 3.13. If you have `pyenv` installed, it should automatically switch Python versions when you `cd` into `server/`.
+4. `python -m venv .venv`
+5. `source .venv/bin/activate` (Repeat this whenever you start a new terminal)
+6. `pip install -r requirements.txt`
+7. Install CCPCA package
 
-      ```py
-      ...
-      print("building cPCA")
-      os.system(
-          f"c++ -O3 -Wall -mtune=native -march=native -shared -std=c++11 -undefined dynamic_lookup -I/opt/homebrew/include/eigen3/ $(python3 -m pybind11 --includes) cpca.cpp cpca_wrap.cpp -o cpca_cpp{extension_suffix}"
-      )
-      print("building ccPCA")
-      os.system(
-          f"c++ -O3 -Wall -mtune=native -march=native -shared -std=c++11 -undefined dynamic_lookup -I/opt/homebrew/include/eigen3/ $(python3 -m pybind11 --includes) cpca.cpp cpca_wrap.cpp ccpca.cpp ccpca_wrap.cpp -o ccpca_cpp{extension_suffix}"
-      )
-      ...
-      ```
-   6. Install both `ccpca/ccpca/` and `ccpca/fc_view/` as instructed in [https://github.com/takanori-fujiwara/ccpca/blob/master/README.md](https://github.com/takanori-fujiwara/ccpca/blob/master/README.md)
+   1. Options:
+      1. Clone the repo:`git clone https://github.com/takanori-fujiwara/ccpca.git`, follow instructions in the README.md file
+      2. Run `pip install ccpca`
+8. Add data to server/data/
+
+   1. Format (csv):
+
+   | timestamp           | nodeId | metric_1 | metric_2 | metric_n |
+   | ------------------- | ------ | -------- | -------- | -------- |
+   | MM-DD-YYYY HH:mm:ss | node0  | ...      | ...      | ...      |
+   | MM-DD-YYYY HH:mm:ss | node1  | ...      | ...      | ...      |
 
 ### Usage
 
-1. `cd server`
-2. `source .venv/bin/activate`
-3. `python server.py`
+1. Open terminal
+2. `cd server`
+3. `source .venv/bin/activate`
+4. `python server.py`
 
 ## References
 
@@ -65,4 +64,5 @@
 3. S. Shilpika et al., "A Multi-Level, Multi-Scale Visual Analytics Approach to Assessment of Multifidelity HPC Systems," 2024 IEEE 24th International Symposium on Cluster, Cloud and Internet Computing (CCGrid), Philadelphia, PA, USA, 2024, pp. 478-488, doi: 10.1109/CCGrid59990.2024.00060. [code](https://github.com/sshilpika/mrdmd-frequency-isolation)
 
 ### Citation
+
 Allison Austin, Shilpika, Yan To Linus Lam, Yun-Hsin Kuo, Venkatram Vishwanath, Michael E. Papka, & Kwan-Liu Ma (2026). Understanding Large-Scale HPC System Behavior Through Cluster-Based Visual Analytics. arXiv. https://doi.org/10.48550/arXiv.2604.11965

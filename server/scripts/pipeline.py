@@ -6,8 +6,8 @@ from timeit import default_timer as timer
 import numpy as np
 import pandas as pd
 from ccpca import CCPCA
-from mat_reorder import MatReorder
-from opt_sign_flip import OptSignFlip
+from fc_view import MatReorder
+from fc_view import OptSignFlip
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
