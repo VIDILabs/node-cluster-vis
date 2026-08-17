@@ -2,7 +2,13 @@ node_modules
 
 package-lock.json
 
-data/
+ui/build/
+ui/.env.development
+ui/.env.local
+
+server/data/*
+!server/data/sample_metrics.csv
+!server/data/sample_metrics.headers.json
 
 .DS_Store
 
@@ -10,6 +16,7 @@ data/
 
 server/scripts/notebooks/
 server/scripts/cache/
+server/scripts/anonymize.py
 
 ltnc/
 

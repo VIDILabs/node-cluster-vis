@@ -1,12 +1,13 @@
 import * as d3 from 'd3';
-import { useState, useEffect, useRef } from 'react';
+import { useCallback, useState, useEffect, useRef } from 'react';
 import { Switch, Space } from 'antd';
 import LineChart from './LineChart.js';
+import api from '../api.js';
 import { colorScale, COLORS } from '../utils/colors.js';
 
 const MetricView = ({ data, timeRange, selectedDims, selectedPoints, zScores, setzScores, setBaselines, baselines, baselinesRef, nodeClusterMap, headerMap }) => {
     const chartsRef = useRef([]);
-    const [selectedTimeRange, setSelectedTimeRange] = useState(timeRange);
+    const selectedTimeRange = timeRange;
     const [showBaselines, setShowBaselines] = useState(true);
     
     useEffect(() => {
@@ -59,7 +60,7 @@ const MetricView = ({ data, timeRange, selectedDims, selectedPoints, zScores, se
 
       window.addEventListener('time-domain-updated', handleTimeDomainUpdate);
       return () => window.removeEventListener('time-domain-updated', handleTimeDomainUpdate);
-    }, []);
+    }, [baselinesRef]);
 
     // Updating line chart colors on cluster config
     useEffect(() => {
@@ -77,21 +78,28 @@ const MetricView = ({ data, timeRange, selectedDims, selectedPoints, zScores, se
       });
     }, [nodeClusterMap]);
 
-    if (!data || !baselines) return;
+    // Stable identity: LineChart depends on this in an effect, so recreating it
+    // every render would redraw each chart on every parent update.
+    const registerChart = useCallback((chartObj) => {
+      // Replace the entry for this field rather than appending: LineChart
+      // re-registers on every redraw, so pushing grew the list without bound and
+      // made the shared time-domain handler work on stale chart handles.
+      const existing = chartsRef.current.findIndex(c => c.field === chartObj.field);
+      if (existing === -1) chartsRef.current.push(chartObj);
+      else chartsRef.current[existing] = chartObj;
+    }, []);
 
-    function toCustomString(date) {
-      return date.toString().replace(/ GMT[^\)]+(\))/g, ' GMT');
-    }
-
-    const updateBaseline = (field, newBaseline) => {
-      // console.log(field, newBaseline)
+    const updateBaseline = useCallback((field, newBaseline) => {
       baselinesRef.current[field] = newBaseline;
       const [start, end] = newBaseline.baselineX;
       const [v_min, v_max] = newBaseline.baselineY;
 
-      const b_start = toCustomString(start);
-      const b_end = toCustomString(end);
-      
+      // ISO strings round-trip through the API unambiguously; the previous
+      // hand-rolled "GMT" stringification depended on the browser's locale
+      // formatting and lost the zone on some engines.
+      const b_start = start.toISOString();
+      const b_end = end.toISOString();
+
       // updating baselines
       setBaselines(prevBaselines => {
         const exists = prevBaselines.some(b => b.feature === field);
@@ -109,34 +117,30 @@ const MetricView = ({ data, timeRange, selectedDims, selectedPoints, zScores, se
           ];
         }
       });
-      fetch(`http://127.0.0.1:5010/mrdmd/${selectedPoints}/${field}/0/1/${v_min}/${v_max}/${b_start}/${b_end}`)
-        .then(response => response.json())
-        .then(data => {
-            if (data.zscores) {
-              setzScores(prevZScores => {
-                const updatesMap = new Map(
-                    data.zscores.map(d => {
-                        return [d.nodeId, d[field]]; 
-                    })
-                );
-
-                return prevZScores.map(d => {
-                    if (updatesMap.has(d.nodeId)) {
-                        const newValue = updatesMap.get(d.nodeId);
-                        const isValid = newValue !== null && newValue !== undefined && newValue !== "";
-
-                        return {
-                            ...d,
-                            [field]: isValid ? parseFloat(newValue) : d[field]
-                        };
-                    }
-                    return d;
-                });
-              });
-            }
+      api.mrdmd({
+        nodes: selectedPoints,
+        metrics: [field],
+        vMin: v_min,
+        vMax: v_max,
+        bStart: b_start,
+        bEnd: b_end,
+      })
+        .then(payload => {
+          if (!payload.zscores) return;
+          setzScores(prevZScores => {
+            const updates = new Map(payload.zscores.map(d => [d.nodeId, d[field]]));
+            return prevZScores.map(d => {
+              if (!updates.has(d.nodeId)) return d;
+              const value = updates.get(d.nodeId);
+              const isValid = value !== null && value !== undefined && value !== "";
+              return { ...d, [field]: isValid ? parseFloat(value) : d[field] };
+            });
+          });
         })
-        .catch(error => console.error('Error fetching data:', error));
-    };
+        .catch(error => console.error('Could not update baseline:', error));
+    }, [baselinesRef, selectedPoints, setBaselines, setzScores]);
+
+    if (!data || !baselines) return null;
 
     return (
       <div style={{ overflow: 'auto', height: "calc(60vh - 40px)", }}>
@@ -180,9 +184,7 @@ const MetricView = ({ data, timeRange, selectedDims, selectedPoints, zScores, se
                     updateBaseline={updateBaseline}
                     nodeClusterMap={nodeClusterMap}
                     metadata={headerMap[field]}
-                    registerChart={(chartObj) => {
-                        chartsRef.current.push(chartObj);
-                    }}
+                    registerChart={registerChart}
                     showBaselines={showBaselines}
                 />
             );

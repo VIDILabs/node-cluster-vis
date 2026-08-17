@@ -1,297 +1,424 @@
-import json
+"""HTTP API for the cluster-based visual analytics dashboard.
+
+Routes take query parameters rather than path segments so that metric names
+containing spaces, slashes, or other awkward characters survive the round trip
+without the caller having to escape them by hand.
+
+Every response is derived from whichever dataset is currently loaded; see
+``datasource.py`` for what counts as a valid source.
+"""
 import os
-from datetime import datetime
-
-import pandas as pd
-from flask import Flask, abort, jsonify
-from flask_cors import CORS
-
 from timeit import default_timer as timer
-from concurrent.futures import ThreadPoolExecutor
-from scripts.pipeline import get_feat_contributions
-
-from mrdmd import get_mrdmd, get_mrdmd_with_new_base
-from scripts.pipeline import (get_dr_time, get_feat_contributions,
-                             recompute_clusters)
-
-app = Flask(__name__)
-CORS(app)
-
-data_dir = os.path.join(os.path.dirname(__file__), 'data')
-ts_data = pd.DataFrame()
-headers = pd.DataFrame()
-filepath = './data/'
-file = 'ganglia_2024-02-21.csv'
-CACHE_DIR = './scripts/cache/'
-DR1_CACHE_NAME = CACHE_DIR + 'drTimeDataDR1.parquet'
-DR2_CACHE_NAME = CACHE_DIR + 'drTimeDataDR2.parquet'
-ZSC_B_CACHE_NAME = CACHE_DIR + 'mrDMDbaselineZscores.parquet'
-CLUSTER_CACHE_NAME  = CACHE_DIR + 'cluster_assignments.parquet'
-streaming_state = {"next_batch_idx": 0}
-
-@app.route('/loadData', methods=['GET'])
-def get_timeseries_data(file):
-    # TODO: convert to parquet instead of global
-    global ts_data
-    global filepath
-    ts_data = pd.read_csv(filepath+file).fillna(0.0)
-    # use below for env logs
-    if ('time_secs' in ts_data.columns):
-        ts_data['timestamp'] = ts_data['time_secs']
-        ts_data.drop(columns=['time_secs'], inplace=True)
-    if ('cname_processed' in ts_data.columns):
-        ts_data['nodeId'] = ts_data['cname_processed']
-        ts_data.drop(columns=['cname_id', 'cname_processed'], inplace=True)
-    return ts_data
-
-def clear_caches():
-    # print('Clearing caches on startup.')
-    if os.path.exists(DR1_CACHE_NAME):
-        os.remove(DR1_CACHE_NAME)
-    if os.path.exists(DR2_CACHE_NAME):
-        os.remove(DR2_CACHE_NAME)
-    if os.path.exists(ZSC_B_CACHE_NAME):
-        os.remove(ZSC_B_CACHE_NAME)
-    # if os.path.exists(CLUSTER_CACHE_NAME):
-    #     os.remove(CLUSTER_CACHE_NAME)
-
-def reset_stream():
-    global ts_data, streaming_state
-    streaming_state["next_batch_idx"] = 0
-    ts_data = get_timeseries_data(file)    
-
-@app.route('/headers', methods=['GET'])
-def get_headers():
-    global headers 
-
-    metadata = []
-    headers_dir = os.path.join(data_dir, 'headers')
-    try:
-        for fname in os.listdir(headers_dir):
-            if fname.endswith('.json'):
-                with open(os.path.join(headers_dir, fname), 'r', encoding='utf-8') as f:
-                    metadata.append(json.load(f))
-        return jsonify(metadata)
-    except Exception as e:
-        return jsonify({"error": "Could not read headers", "details": str(e)}), 500
-
-# PC across time points
-@app.route('/drTimeData/<n_neighbors>/<min_dist>/<num_clusters>', methods=['GET'])
-def get_dr_data_flask(n_neighbors, min_dist, num_clusters):
-    global ts_data
-
-    if ts_data is None or ts_data.empty:
-        ts_data = get_timeseries_data(file)
-
-    print("DR data shape:", ts_data.shape)
-    
-    df = get_dr_time(ts_data, int(n_neighbors), float(min_dist), int(num_clusters), 1)
-    df[['nodeId', 'Cluster']].to_parquet(CLUSTER_CACHE_NAME, index=False)
-    fc_start = timer()
-    agg_feat_contrib_mat, label_to_rows, label_to_rep_row, order_col, = get_feat_contributions(df)
-    fc_end = timer()
-
-    print(f'ccpca in {(fc_end - fc_start)}s')
-
-    response = {
-        "dr_features": df.to_dict(orient='records'),  # main DR results + ClusterID
-        "feat_contributions": {
-            "agg_feat_contrib_mat": agg_feat_contrib_mat.tolist(),
-            "label_to_rows": [list(rows) for rows in label_to_rows],
-            "label_to_rep_row": label_to_rep_row,
-            "order_col": order_col
-        },
-    }
-    return jsonify(response)
-
-@app.route('/recomputeClusters/<numClusters>/<n_neighbors>/<min_dist>/<force_recompute>')
-def get_new_cluster_ids(numClusters, n_neighbors, min_dist, force_recompute=0):
-    global ts_data
-    recomputed = recompute_clusters(ts_data, int(numClusters), int(n_neighbors), float(min_dist), int(force_recompute))
-    if recomputed is None:
-        # DR2 is wiped on startup so recompute_clusters always pulls from fresh DR2 data.
-        # recompute_clusters() returns None if DR2 is not found in cache.
-        # This error state can happen if you query /recomputeClusters on server startup before /drTimeData,
-        # e.g. if the server restarted and # clusters is changed on the frontend without a page refresh.
-        abort(404, description="No cached DR2 was found.")
-    return jsonify(recomputed)
-
-@app.route('/mrdmd/<nodes>/<selectedCols>/<recompute_base>/<new_base>/<bmin>/<bmax>/<sob>/<eob>', methods=['GET'])
-def get_mrdmd_results(nodes, selectedCols, recompute_base=0, new_base=0, bmin=None, bmax=None, sob=None, eob=None):
-    global ts_data
-
-    colsList = list([col.replace('%', ' ') for col in selectedCols.split(',') if col.strip()] )
-    nodeList = list(set(nodes.split(',')))
-    cols = ['timestamp', 'nodeId'] + colsList
-
-    filtered_data = ts_data[ts_data['nodeId'].isin(nodeList)]
-
-    # print('mrdmd:', filtered_data[cols].shape)
-    avail_cols = [col for col in cols if col in filtered_data.columns]
-    print('mrdmd:', filtered_data[avail_cols].shape)
-
-    if (filtered_data.shape[0] > 0):
-        if (int(new_base) == 0):
-            zscores, baselines = get_mrdmd(filtered_data[avail_cols], int(recompute_base))
-        else:
-            start_time = pd.to_datetime(sob)
-            end_time = pd.to_datetime(eob)
-            zscores, baselines = get_mrdmd_with_new_base(filtered_data[avail_cols], selectedCols, float(bmin), float(bmax), start_time, end_time)
-    else: 
-        zscores = pd.DataFrame()
-        baselines = pd.DataFrame()
-        
-    response = {
-        "zscores": zscores.to_dict(orient='records'),
-        "baselines": baselines.to_dict(orient='records')
-    }
-    return jsonify(response)
 
 import numpy as np
-from scipy.optimize import linear_sum_assignment
+import pandas as pd
+from flask import Flask, jsonify, request
+from flask_cors import CORS
 
-def align_clusters(old_df, new_df):
+import config
+import datasource
+from datasource import DataSourceError
+from mrdmd import get_mrdmd, get_mrdmd_with_new_base
+from scripts import pipeline
+from state import store
+
+NODE = config.NODE_COLUMN
+TIME = config.TIME_COLUMN
+
+app = Flask(__name__)
+CORS(app, origins=config.CORS_ORIGINS)
+
+
+# --- helpers ---------------------------------------------------------------
+
+@app.errorhandler(DataSourceError)
+def handle_source_error(error):
+    return jsonify({'error': str(error)}), error.status
+
+
+def _csv_param(name, default=None):
+    """Read a repeated-or-comma-joined query parameter into a list."""
+    values = request.args.getlist(name)
+    if len(values) == 1:
+        values = values[0].split(',')
+    cleaned = [v.strip() for v in values if v and v.strip()]
+    return cleaned if cleaned else (default if default is not None else [])
+
+
+def _int_param(name, default):
+    try:
+        return int(request.args.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _float_param(name, default):
+    try:
+        return float(request.args.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _bool_param(name, default=False):
+    raw = request.args.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def _known_metrics(requested):
+    """Keep only metrics that exist, preserving the caller's order."""
+    available = set(store.dataset.metrics)
+    return [m for m in requested if m in available]
+
+
+def _records(frame):
+    """JSON-safe records: NaN/inf become null and timestamps become ISO strings."""
+    out = frame.copy()
+    for column in out.columns:
+        if pd.api.types.is_datetime64_any_dtype(out[column]):
+            out[column] = out[column].dt.strftime('%Y-%m-%dT%H:%M:%S')
+    out = out.replace({np.nan: None, np.inf: None, -np.inf: None})
+    return out.to_dict(orient='records')
+
+
+def _with_downtime(frame, metrics):
+    """Flag rows where every selected metric reads zero.
+
+    Derived here rather than trusted from the source file so the flag means the
+    same thing for every dataset.
     """
-    Renames new_df['Cluster'] labels to match old_df['Cluster'] labels
-    based on the highest node overlap.
-    """
-    old_clusters = sorted(old_df['Cluster'].unique())
-    new_clusters = sorted(new_df['Cluster'].unique())
-    
-    cost_matrix = np.zeros((len(old_clusters), len(new_clusters)))
-    
-    for i, old_c in enumerate(old_clusters):
-        nodes_old = set(old_df[old_df['Cluster'] == old_c]['nodeId'])
-        for j, new_c in enumerate(new_clusters):
-            nodes_new = set(new_df[new_df['Cluster'] == new_c]['nodeId'])
-            # Cost is the number of nodes NOT in common
-            intersection = len(nodes_old.intersection(nodes_new))
-            cost_matrix[i, j] = -intersection
-
-    # Hungarian Algorithm to find best mapping
-    row_ind, col_ind = linear_sum_assignment(cost_matrix)
-    mapping = {new_clusters[col]: old_clusters[row] for row, col in zip(row_ind, col_ind)}
-    new_df['Cluster'] = new_df['Cluster'].map(mapping)
-    return new_df
-
-def compute_dr_data(n_neighbors, min_dist, num_clusters):
-    global ts_data
-    df = get_dr_time(ts_data, int(n_neighbors), float(min_dist), int(num_clusters), 1)
-
-    if os.path.exists(CLUSTER_CACHE_NAME):
-        df_old = pd.read_parquet(CLUSTER_CACHE_NAME)
-        df_new = align_clusters(df_old, df)
+    frame = frame.copy()
+    if metrics:
+        frame['downtime'] = (frame[metrics] == 0).all(axis=1).astype(int)
     else:
-        df_new = df
+        frame['downtime'] = 0
+    return frame
 
-    fc_start = timer()
-    agg_feat_contrib_mat, label_to_rows, label_to_rep_row, order_col = get_feat_contributions(df_new)
-    fc_end = timer()
-    print(f'ccpca in {(fc_end - fc_start)}s')
 
-    return {
-        "dr_features": df_new.to_dict(orient='records'),
-        "feat_contributions": {
-            "agg_feat_contrib_mat": agg_feat_contrib_mat.tolist(),
-            "label_to_rows": [list(rows) for rows in label_to_rows],
-            "label_to_rep_row": label_to_rep_row,
-            "order_col": order_col
-        },
-    }
+# --- dataset management ----------------------------------------------------
 
-def compute_mrdmd(nodes, selectedCols, recompute_base):
-    global ts_data
-    colsList = [col.replace('%', ' ') for col in selectedCols.split(',') if col.strip()]
-    nodeList = list(set(nodes.split(',')))
-    avail_cols = ['timestamp', 'nodeId'] + [c for c in colsList if c in ts_data.columns]
-    
-    filtered_data = ts_data[ts_data['nodeId'].isin(nodeList)]
-    
-    if not filtered_data.empty:
-        zscores, baselines = get_mrdmd(filtered_data[avail_cols], int(recompute_base))
-    else:
-        zscores, baselines = pd.DataFrame(), pd.DataFrame()
-
-    return {
-        "zscores": zscores.to_dict(orient='records'),
-        "baselines": baselines.to_dict(orient='records')
-    }
-
-@app.route('/nodeData/<selectedCols>/<file>', methods=['GET'])
-def get_node_data(selectedCols, file):
-    global ts_data
-
-    if ts_data is None or ts_data.empty:
-        ts_data = get_timeseries_data(file)
-    
-    colsList = list([col.replace('%', ' ') for col in selectedCols.split(',') if col.strip()] )
-    cols = ['timestamp', 'nodeId'] + colsList
-    df = ts_data[cols].copy()
-    
-    excluded = ['nodeId', 'timestamp', 'Retrans', 'PCA', 'UMAP', 't-SNE', 'Cluster']
-    all_features = [col for col in ts_data.columns if not any(exclude in col for exclude in excluded)]
-    
-    check_cols = [col for col in df.columns if col not in ['nodeId', 'timestamp']]
-    df['downtime'] = (df[check_cols] == 0).all(axis=1).astype(int)
-
+@app.route('/api/health', methods=['GET'])
+def health():
     return jsonify({
-        "data": df.to_dict(orient='records'),
-        "features": all_features
+        'status': 'ok',
+        'datasetLoaded': store.is_loaded(),
+        'dataset': store.dataset.name if store.is_loaded() else None,
     })
 
-@app.route('/ingest_stream/<selectedCols>/<nodeList>/<n_neighbors>/<min_dist>/<num_clusters>', methods=['POST'])
-def ingest_stream(selectedCols, nodeList, n_neighbors, min_dist, num_clusters):
-    global ts_data, streaming_state
-    
-    batch_dir = os.path.join(filepath, 'batch')
-    idx = streaming_state["next_batch_idx"]
-    filename = f"batch_{idx:03d}.csv"
-    file_path = os.path.join(batch_dir, filename)
 
-    if not os.path.exists(file_path):
-        return jsonify({"status": "exhausted", "message": "No more batch files found."}), 404
+@app.route('/api/datasets', methods=['GET'])
+def list_datasets():
+    """Datasets discoverable on disk, plus a description of the active one."""
+    return jsonify({
+        'available': datasource.list_datasets(),
+        'active': store.dataset.describe() if store.is_loaded() else None,
+        'acceptsRemote': True,
+        'schema': {
+            'nodeColumn': NODE,
+            'timeColumn': TIME,
+            'nodeAliases': config.NODE_COLUMN_ALIASES,
+            'timeAliases': config.TIME_COLUMN_ALIASES,
+        },
+    })
 
-    try:
-        # loading the new batch
-        new_batch = pd.read_csv(file_path).fillna(0.0)
-        if 'time_secs' in new_batch.columns:
-            new_batch['timestamp'] = new_batch['time_secs']
-        if 'cname_processed' in new_batch.columns:
-            new_batch['nodeId'] = new_batch['cname_processed']
 
-        # updating global data
-        ts_data = pd.concat([ts_data, new_batch], ignore_index=True)
-        ts_data = ts_data.drop_duplicates(subset=['timestamp', 'nodeId'], keep='last')
-        print("Updated ts_data shape:", ts_data.shape)
+@app.route('/api/datasets/load', methods=['POST'])
+def load_dataset_route():
+    """Ingest from any source: a filename in the data dir, a path, or a URL.
 
-        colsList = list([col.replace('%', ' ') for col in selectedCols.split(',') if col.strip()] )
-        cols = ['timestamp', 'nodeId'] + colsList
-        df = ts_data[cols].copy()
-        check_cols = [col for col in df.columns if col not in ['nodeId', 'timestamp']]
-        df['downtime'] = (df[check_cols] == 0).all(axis=1).astype(int)
+    Body: ``{"source": "sample_metrics.csv"}`` or
+    ``{"source": "https://example.org/telemetry.csv", "name": "prod"}``.
+    """
+    payload = request.get_json(silent=True) or {}
+    source = payload.get('source') or request.args.get('source')
+    if not source:
+        raise DataSourceError('Provide a "source" (filename, path, or http(s) URL).')
+    dataset = store.load(source, name=payload.get('name'))
+    return jsonify(dataset.describe())
 
-        # recomputing pipeline
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            future_dr = executor.submit(compute_dr_data, n_neighbors, min_dist, num_clusters)
-            future_mrdmd = executor.submit(compute_mrdmd, nodeList, selectedCols, 1)
 
-            dr_results = future_dr.result()
-            mrdmd_results = future_mrdmd.result()
+@app.route('/api/metadata', methods=['GET'])
+def metadata():
+    """Per-metric display metadata for the metrics actually present."""
+    headers = store.headers
+    metrics = store.dataset.metrics
+    resolved = {}
+    for metric in metrics:
+        info = headers.get(metric, {})
+        resolved[metric] = {
+            'title': info.get('title', metric),
+            'units': info.get('units', ''),
+            'desc': info.get('desc', ''),
+            'groups': info.get('groups', []),
+        }
+    return jsonify(resolved)
 
-        streaming_state["next_batch_idx"] += 1
 
+# --- raw series ------------------------------------------------------------
+
+@app.route('/api/series', methods=['GET'])
+def series():
+    """Downsampled per-node series for the requested metrics.
+
+    Query: ``metrics``, optional ``nodes``, optional ``maxPoints``.
+    Sending only the requested columns, thinned to ``maxPoints`` samples per
+    node, is what keeps this response small on multi-hundred-megabyte inputs.
+    """
+    dataset = store.dataset
+    metrics = _known_metrics(_csv_param('metrics', dataset.metrics))
+    nodes = _csv_param('nodes')
+
+    frame = dataset.frame
+    if nodes:
+        frame = frame[frame[NODE].isin(nodes)]
+
+    frame = frame[[NODE, TIME] + metrics]
+    frame = _with_downtime(frame, metrics)
+    frame = datasource.downsample(frame, _int_param('maxPoints', config.SERIES_MAX_POINTS))
+
+    return jsonify({
+        'data': _records(frame),
+        'metrics': metrics,
+        'allMetrics': dataset.metrics,
+        'nodes': sorted(frame[NODE].unique().tolist()),
+        'start': datasource._iso(dataset.start),
+        'end': datasource._iso(dataset.end),
+    })
+
+
+@app.route('/api/cluster-averages', methods=['GET'])
+def cluster_averages():
+    """Mean of each metric per cluster over time, for the sparkline column.
+
+    Computed here because doing it in the browser means shipping every raw row
+    to the client and re-reducing it on each render.
+    """
+    dataset = store.dataset
+    metrics = _known_metrics(_csv_param('metrics', dataset.metrics))
+    bin_seconds = _int_param('binSeconds', 60)
+    max_points = _int_param('maxPoints', 60)
+
+    assignments = store._cluster_assignments
+    if assignments is None or assignments.empty:
+        return jsonify({})
+
+    frame = dataset.frame[[NODE, TIME] + metrics].merge(assignments, on=NODE, how='inner')
+    if frame.empty:
+        return jsonify({})
+
+    bucket = frame[TIME].dt.floor(f'{max(bin_seconds, 1)}s')
+    grouped = frame.groupby(['Cluster', bucket], sort=True)[metrics].mean().reset_index()
+    grouped = grouped.rename(columns={grouped.columns[1]: TIME})
+
+    result = {metric: {} for metric in metrics}
+    for cluster, chunk in grouped.groupby('Cluster', sort=True):
+        chunk = chunk.sort_values(TIME)
+        if len(chunk) > max_points:
+            stride = int(np.ceil(len(chunk) / max_points))
+            chunk = chunk.iloc[::stride]
+        stamps = chunk[TIME].dt.strftime('%Y-%m-%dT%H:%M:%S').tolist()
+        for metric in metrics:
+            values = chunk[metric].replace({np.nan: None, np.inf: None, -np.inf: None})
+            result[metric][int(cluster)] = [
+                {'timestamp': t, 'value': v}
+                for t, v in zip(stamps, values.tolist())
+            ]
+    return jsonify(result)
+
+
+# --- dimensionality reduction ---------------------------------------------
+
+def _dr_payload(n_neighbors, min_dist, num_clusters, force_recompute):
+    dataset = store.dataset
+    df = pipeline.get_dr_time(
+        dataset.frame, dataset.key(), n_neighbors, min_dist, num_clusters,
+        force_recompute=force_recompute,
+    )
+    df = store.align_clusters(df)
+
+    fc_start = timer()
+    contributions = pipeline.get_feat_contributions(df)
+    print(f'ccpca in {timer() - fc_start:.3f}s')
+
+    return {
+        'dr_features': _records(df.reset_index(drop=True)),
+        'node_cluster_map': _records(df[[NODE, 'Cluster']].reset_index(drop=True)),
+        'feat_contributions': contributions,
+    }
+
+
+@app.route('/api/dr', methods=['GET'])
+def dr():
+    """Two-step DR embedding, cluster labels, and ccPCA feature contributions."""
+    return jsonify(_dr_payload(
+        _int_param('n_neighbors', config.DEFAULT_N_NEIGHBORS),
+        _float_param('min_dist', config.DEFAULT_MIN_DIST),
+        _int_param('num_clusters', config.DEFAULT_NUM_CLUSTERS),
+        _bool_param('force', False),
+    ))
+
+
+@app.route('/api/clusters', methods=['GET'])
+def clusters():
+    """Re-label the cached embedding for a new k without re-running DR."""
+    n_neighbors = _int_param('n_neighbors', config.DEFAULT_N_NEIGHBORS)
+    min_dist = _float_param('min_dist', config.DEFAULT_MIN_DIST)
+    num_clusters = _int_param('num_clusters', config.DEFAULT_NUM_CLUSTERS)
+
+    if _bool_param('force', False):
+        return jsonify(_dr_payload(n_neighbors, min_dist, num_clusters, True))
+
+    dataset = store.dataset
+    df = pipeline.recompute_clusters(dataset.key(), num_clusters, n_neighbors, min_dist)
+    if df is None:
+        # Nothing cached for these parameters yet, so fall back to a full pass
+        # instead of failing the request.
+        return jsonify(_dr_payload(n_neighbors, min_dist, num_clusters, False))
+
+    df = store.align_clusters(df)
+    return jsonify({
+        'dr_features': _records(df.reset_index(drop=True)),
+        'node_cluster_map': _records(df[[NODE, 'Cluster']].reset_index(drop=True)),
+        'feat_contributions': pipeline.get_feat_contributions(df),
+    })
+
+
+# --- mrDMD ----------------------------------------------------------------
+
+@app.route('/api/mrdmd', methods=['GET'])
+def mrdmd_route():
+    """Per-node deviation from a metric baseline.
+
+    Query: ``nodes``, ``metrics``, optional ``recomputeBase``. Supplying
+    ``vMin``/``vMax``/``bStart``/``bEnd`` scores against that explicit baseline
+    instead of the automatically derived one.
+    """
+    dataset = store.dataset
+    metrics = _known_metrics(_csv_param('metrics'))
+    nodes = _csv_param('nodes')
+
+    if not metrics:
+        return jsonify({'zscores': [], 'baselines': []})
+
+    frame = dataset.frame
+    if nodes:
+        frame = frame[frame[NODE].isin(nodes)]
+    frame = frame[[NODE, TIME] + metrics]
+
+    if frame.empty:
+        return jsonify({'zscores': [], 'baselines': []})
+
+    b_start = request.args.get('bStart')
+    b_end = request.args.get('bEnd')
+    has_explicit_base = all(
+        request.args.get(k) is not None for k in ('vMin', 'vMax')
+    ) and b_start and b_end
+
+    if has_explicit_base:
+        zscores, baselines = get_mrdmd_with_new_base(
+            frame,
+            metrics[0],
+            _float_param('vMin', 0.0),
+            _float_param('vMax', 0.0),
+            pd.to_datetime(b_start),
+            pd.to_datetime(b_end),
+        )
+    else:
+        zscores, baselines = get_mrdmd(
+            frame, dataset.key(), _bool_param('recomputeBase', False)
+        )
+
+    return jsonify({
+        'zscores': _records(zscores) if not zscores.empty else [],
+        'baselines': _records(baselines) if not baselines.empty else [],
+    })
+
+
+# --- streaming -------------------------------------------------------------
+
+@app.route('/api/stream/next', methods=['POST'])
+def stream_next():
+    """Append the next batch file and return refreshed DR + mrDMD results.
+
+    Batches are read in order from ``config.BATCH_DIR``; a 404 means the
+    sequence is exhausted.
+    """
+    payload = request.get_json(silent=True) or {}
+    metrics = _known_metrics(payload.get('metrics') or [])
+    nodes = payload.get('nodes') or []
+
+    index = store.stream_index
+    filename = f'batch_{index:03d}.csv'
+    path = os.path.join(config.BATCH_DIR, filename)
+    if not os.path.isfile(path):
         return jsonify({
-            "status": "success",
-            "data": df.to_dict(orient='records'),
-            "dr_results": dr_results,
-            "mrdmd_results": mrdmd_results
-        })
+            'status': 'exhausted',
+            'message': f'No batch file at {filename}.',
+        }), 404
 
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500     
+    store.append(pd.read_csv(path))
+    dataset = store.dataset
+
+    n_neighbors = int(payload.get('n_neighbors', config.DEFAULT_N_NEIGHBORS))
+    min_dist = float(payload.get('min_dist', config.DEFAULT_MIN_DIST))
+    num_clusters = int(payload.get('num_clusters', config.DEFAULT_NUM_CLUSTERS))
+
+    dr_results = _dr_payload(n_neighbors, min_dist, num_clusters, False)
+
+    frame = dataset.frame
+    if nodes:
+        frame = frame[frame[NODE].isin(nodes)]
+    if metrics and not frame.empty:
+        zscores, baselines = get_mrdmd(frame[[NODE, TIME] + metrics], dataset.key(), True)
+        mrdmd_results = {
+            'zscores': _records(zscores) if not zscores.empty else [],
+            'baselines': _records(baselines) if not baselines.empty else [],
+        }
+    else:
+        mrdmd_results = {'zscores': [], 'baselines': []}
+
+    series_frame = dataset.frame[[NODE, TIME] + metrics] if metrics else dataset.frame[[NODE, TIME]]
+    series_frame = datasource.downsample(_with_downtime(series_frame, metrics))
+
+    return jsonify({
+        'status': 'success',
+        'batch': filename,
+        'nextBatch': store.stream_index,
+        'data': _records(series_frame),
+        'dr_results': dr_results,
+        'mrdmd_results': mrdmd_results,
+    })
+
+
+@app.route('/api/stream/status', methods=['GET'])
+def stream_status():
+    index = store.stream_index
+    available = 0
+    if os.path.isdir(config.BATCH_DIR):
+        available = len([f for f in os.listdir(config.BATCH_DIR) if f.endswith('.csv')])
+    return jsonify({
+        'nextBatch': index,
+        'available': available,
+        'exhausted': index >= available,
+    })
+
+
+def bootstrap():
+    """Load the startup dataset. A failure here is logged, not fatal.
+
+    Leaving the server up lets an operator ingest a working source through the
+    API instead of having to fix configuration and restart.
+    """
+    config.ensure_dirs()
+    pipeline.clear_cache()
+    try:
+        store.load(datasource.default_dataset_name())
+    except DataSourceError as exc:
+        print(f'Startup dataset not loaded: {exc}')
+
+
+bootstrap()
 
 if __name__ == '__main__':
-    ts_data = get_timeseries_data(file)
-    clear_caches()
-    reset_stream()
-    app.run(debug=True, port=5010)
+    app.run(host=config.HOST, port=config.PORT, debug=config.DEBUG)

@@ -1,0 +1,88 @@
+{
+  "Missed Buffers_P1": {
+    "desc": "Anonymized sample metric \"Missed Buffers_P1\".",
+    "groups": [
+      "sample"
+    ],
+    "title": "Missed Buffers P1",
+    "type": "float",
+    "units": ""
+  },
+  "bytes_out": {
+    "desc": "Number of bytes out per second",
+    "filename": "bytes_out.json",
+    "groups": [
+      "network"
+    ],
+    "slope": "both",
+    "title": "Bytes Sent",
+    "type": "float",
+    "units": "bytes/sec"
+  },
+  "cpu_nice": {
+    "desc": "Percentage of CPU utilization that occurred while executing at the user level with nice priority",
+    "filename": "cpu_nice.json",
+    "groups": [
+      "cpu"
+    ],
+    "slope": "both",
+    "title": "CPU Nice",
+    "type": "float",
+    "units": "%"
+  },
+  "cpu_num": {
+    "desc": "Total number of CPUs",
+    "filename": "cpu_num.json",
+    "groups": [
+      "cpu"
+    ],
+    "slope": "zero",
+    "title": "CPU Count",
+    "type": "uint16",
+    "units": "CPUs"
+  },
+  "cpu_user": {
+    "desc": "Percentage of CPU utilization that occurred while executing at the user level",
+    "filename": "cpu_user.json",
+    "groups": [
+      "cpu"
+    ],
+    "slope": "both",
+    "title": "CPU User",
+    "type": "float",
+    "units": "%"
+  },
+  "cpu_wio": {
+    "desc": "Percentage of time that the CPU or CPUs were idle during which the system had an outstanding disk I/O request",
+    "filename": "cpu_wio.json",
+    "groups": [
+      "cpu"
+    ],
+    "slope": "both",
+    "title": "CPU wio",
+    "type": "float",
+    "units": "%"
+  },
+  "mem_free": {
+    "desc": "Amount of available memory",
+    "filename": "mem_free.json",
+    "groups": [
+      "memory"
+    ],
+    "slope": "both",
+    "title": "Free Memory",
+    "type": "float",
+    "units": "KB"
+  },
+  "proc_run": {
+    "desc": "Total number of running processes",
+    "filename": "proc_run.json",
+    "groups": [
+      "process"
+    ],
+    "slope": "both",
+    "title": "Total Running Processes",
+    "type": "uint32",
+    "units": " "
+  }
+}

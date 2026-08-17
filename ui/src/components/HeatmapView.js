@@ -1,13 +1,16 @@
-import { useState, useEffect, useRef } from 'react';
-import { colorScale } from '../utils/colors.js';
+import { useCallback, useState, useEffect, useRef } from 'react';
 import { Card } from "antd";
-import Tooltip from '../utils/tooltip.js';
 import * as d3 from 'd3';
+import { colorScale, zScoreColor } from '../utils/colors.js';
+import { lineClass, nodeClass, pointId } from '../utils/nodes.js';
+import Tooltip from '../utils/tooltip.js';
+
+// Fixed axis gutters; these were state that was never set.
+const MARGIN = { top: 0, right: 50, bottom: 100, left: 100 };
 
 const HeatmapView = ({ data, nodeClusterMap }) => {
     const heatmapRef = useRef();
     const legendRef = useRef();
-    const [margin, setMargin] = useState({ top: 0, right: 50, bottom: 100, left: 100 });
     const [tooltip, setTooltip] = useState({
             visible: false,
             content: '',
@@ -15,36 +18,7 @@ const HeatmapView = ({ data, nodeClusterMap }) => {
             y: 0
         });
 
-    useEffect(() => {
-        if (!heatmapRef.current || !nodeClusterMap || !legendRef.current || !data || data.length == 0) return;        
-
-        const nodeIds = data.map(d => d.nodeId);
-    
-        nodeIds.sort((a, b) => {
-            // Extract the part after the last hyphen and convert to number
-            const valA = parseInt(a.split('-').pop());
-            const valB = parseInt(b.split('-').pop());
-            return valA - valB;
-        });
-        
-        const features = Object.keys(data[0]).filter(key => key !== "nodeId")
-        const matrix = [];
-        features.forEach((feature, rowIndex) => {
-            data.forEach((d, colIndex) => {
-                matrix.push({
-                    feature,
-                    nodeId: d.nodeId,
-                    value: d[feature],
-                    row: rowIndex,
-                    col: colIndex
-                });
-            });
-        });
-        drawHeatmap(matrix, features, nodeIds);
-        
-    }, [data, nodeClusterMap]);
-
-    const drawHeatmap = (matrix, featureNames, nodeIds) => {
+    const drawHeatmap = useCallback((matrix, featureNames, nodeIds) => {
         const cellWidth = 20;
         const cellHeight = 30;
         const mapWidth = nodeIds.length * cellWidth;
@@ -55,7 +29,7 @@ const HeatmapView = ({ data, nodeClusterMap }) => {
 
         const yScale = d3.scaleBand().domain(featureNames).range([0, mapHeight]).padding(0.05);
         const xScale = d3.scaleBand().domain(nodeIds).range([0, mapWidth]).padding(0.05);
-        const myColor = d3.scaleDiverging().interpolator(d3.interpolateRdBu).domain([5, 0, -5]);
+        const myColor = zScoreColor;
 
         const container = d3.select(heatmapRef.current);
         let parent = container.select("#heatmap-parent");
@@ -69,10 +43,10 @@ const HeatmapView = ({ data, nodeClusterMap }) => {
             const scrollDiv = parent.append("div")
                 .attr("id", "heatmap-scroll")
                 .style("position", "absolute")
-                .style("left", `${margin.left}px`)
-                .style("top", `${margin.top}px`)
-                .style("width", `calc(100% - ${margin.left}px)`)
-                .style("height", `${visibleHeight - margin.top - margin.bottom}px`) 
+                .style("left", `${MARGIN.left}px`)
+                .style("top", `${MARGIN.top}px`)
+                .style("width", `calc(100% - ${MARGIN.left}px)`)
+                .style("height", `${visibleHeight - MARGIN.top - MARGIN.bottom}px`) 
                 .style("overflow", "auto")
                 .style("scrollbar-width", "none")
                 .style("z-index", 1);
@@ -94,10 +68,10 @@ const HeatmapView = ({ data, nodeClusterMap }) => {
             axisSvg.append("g").attr("class", "x-axis");
         }
 
-        const stickyXPosition = visibleHeight - margin.bottom;
+        const stickyXPosition = visibleHeight - MARGIN.bottom;
 
         const scrollDiv = container.select("#heatmap-scroll")
-            .style("height", `${stickyXPosition - margin.top}px`); // Clip rows before they hit the X-axis
+            .style("height", `${stickyXPosition - MARGIN.top}px`); // Clip rows before they hit the X-axis
 
         const svg = container.select("#heatmap-svg")
             .attr("width", mapWidth)
@@ -107,13 +81,13 @@ const HeatmapView = ({ data, nodeClusterMap }) => {
             .attr("width", containerNode.clientWidth)
             .attr("height", visibleHeight);
 
-        axisSvg.select("#y-axis-bg").attr("width", margin.left).attr("height", visibleHeight);
+        axisSvg.select("#y-axis-bg").attr("width", MARGIN.left).attr("height", visibleHeight);
         
         axisSvg.select("#x-axis-bg")
-            .attr("x", margin.left)
+            .attr("x", MARGIN.left)
             .attr("y", stickyXPosition) 
-            .attr("width", containerNode.clientWidth - margin.left)
-            .attr("height", margin.bottom);
+            .attr("width", containerNode.clientWidth - MARGIN.left)
+            .attr("height", MARGIN.bottom);
 
         container.select(".y-axis").call(d3.axisLeft(yScale));
         container.select(".x-axis")
@@ -122,7 +96,7 @@ const HeatmapView = ({ data, nodeClusterMap }) => {
             .attr("transform", "rotate(-65)")
             .attr("dx", "-.8em").attr("dy", ".15em")
             .style("text-anchor", "end")
-            .style("fill", d => colorScale(nodeClusterMap.get(d) ?? "black"))
+            .style("fill", d => colorScale(nodeClusterMap.get(d)))
             .style("font-weight", "bold");
 
         function syncAxesToScroll() {
@@ -131,10 +105,10 @@ const HeatmapView = ({ data, nodeClusterMap }) => {
             const scrollTop = node.scrollTop;
 
             container.select(".y-axis")
-                .attr("transform", `translate(${margin.left}, ${margin.top - scrollTop})`);
+                .attr("transform", `translate(${MARGIN.left}, ${MARGIN.top - scrollTop})`);
 
             container.select(".x-axis")
-                .attr("transform", `translate(${margin.left - scrollLeft}, ${stickyXPosition})`);
+                .attr("transform", `translate(${MARGIN.left - scrollLeft}, ${stickyXPosition})`);
         }
 
         scrollDiv.on("scroll", syncAxesToScroll);
@@ -146,7 +120,7 @@ const HeatmapView = ({ data, nodeClusterMap }) => {
 
         cells.enter()
             .append("rect")
-            .attr("class", d => `heatmap-cell node-${d.nodeId}`)
+            .attr("class", d => `heatmap-cell ${nodeClass(d.nodeId)}`)
             .merge(cells)
             .attr("x", d => xScale(d.nodeId))
             .attr("y", d => yScale(d.feature))
@@ -155,14 +129,15 @@ const HeatmapView = ({ data, nodeClusterMap }) => {
             .attr("rx", 4).attr("ry", 4)
             .style("fill", d => myColor(d.value))
              .on("mouseover", function(event, d) {
+                const line = lineClass(d.nodeId);
                 d3.select(this).style("stroke", "black").style("stroke-width", "2px").style("opacity", 1);
-                d3.select(`#${d.nodeId}`).transition().duration(150).attr("r", 8).style("opacity", 1);
+                d3.select(`#${pointId(d.nodeId)}`).transition().duration(150).attr("r", 8).style("opacity", 1);
                 d3.selectAll("path.line").transition().duration(150)
-                .style("opacity", function() { return d3.select(this).classed(`line-${d.nodeId}`) ? 1 : 0.1; })
-                .style("stroke-width", function() { return d3.select(this).classed(`line-${d.nodeId}`) ? "3px" : "1.5px"; }); 
+                .style("opacity", function() { return d3.select(this).classed(line) ? 1 : 0.1; })
+                .style("stroke-width", function() { return d3.select(this).classed(line) ? "3px" : "1.5px"; });
                  setTooltip({
                     visible: true,
-                    content: `${d.nodeId}, ${d.value?.toFixed(3) || 'N/A'}`,
+                    content: `${d.nodeId}, ${Number.isFinite(d.value) ? d.value.toFixed(3) : 'N/A'}`,
                     x: event.clientX,
                     y: event.clientY,
                 });
@@ -170,11 +145,12 @@ const HeatmapView = ({ data, nodeClusterMap }) => {
                 })
                 .on("mouseout", function(event, d) {
                     d3.select(this).style("stroke", "none").style("opacity", 0.8);
-                    d3.select(`#${d.nodeId}`).transition().duration(150).attr("r", 4);
+                    // Restore the scatterplot's resting radius, which is 4.
+                    d3.select(`#${pointId(d.nodeId)}`).transition().duration(150).attr("r", 4);
                     d3.selectAll("path.line").interrupt().transition().duration(150)
                     .style("opacity", 0.8).style("stroke-width", "1.5px");
                     setTooltip(prev => ({ ...prev, visible: false }));
-                }); 
+                });
         
         cells.exit().remove();
 
@@ -196,11 +172,13 @@ const HeatmapView = ({ data, nodeClusterMap }) => {
                 .attr("x1", "0%").attr("x2", "100%")
                 .attr("y1", "0%").attr("y2", "0%");
 
+            // Gradient endpoints match the legend axis domain below, so the ramp
+            // and its tick labels describe the same range.
             linearGradient.selectAll("stop")
                 .data([
-                    { offset: "0%", color: myColor(-3) },
+                    { offset: "0%", color: myColor(-5) },
                     { offset: "50%", color: myColor(0) },
-                    { offset: "100%", color: myColor(3) }
+                    { offset: "100%", color: myColor(5) }
                 ])
                 .enter().append("stop")
                 .attr("offset", d => d.offset)
@@ -237,8 +215,33 @@ const HeatmapView = ({ data, nodeClusterMap }) => {
                 .style('font-weight', 'bold')
                 .text('Z-Scores');
         }
-    };
-      
+    }, [nodeClusterMap]);
+
+    useEffect(() => {
+        if (!heatmapRef.current || !nodeClusterMap || !legendRef.current || !data || data.length === 0) return;
+
+        // Natural sort: orders node-2 before node-10 where names carry numbers,
+        // and falls back to plain collation for names that don't — the previous
+        // parseInt-after-last-hyphen rule produced NaN for anything else.
+        const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+        const nodeIds = data.map(d => d.nodeId).sort(collator.compare);
+
+        const features = Object.keys(data[0]).filter(key => key !== "nodeId");
+        const matrix = [];
+        features.forEach((feature, rowIndex) => {
+            data.forEach((d, colIndex) => {
+                matrix.push({
+                    feature,
+                    nodeId: d.nodeId,
+                    value: d[feature],
+                    row: rowIndex,
+                    col: colIndex
+                });
+            });
+        });
+        drawHeatmap(matrix, features, nodeIds);
+    }, [data, nodeClusterMap, drawHeatmap]);
+
 
 return (
     <Card title="NODE BEHAVIOR VIEW" size="small" style={{ height: "calc(50vh - 20px)", width: '100%' }}>

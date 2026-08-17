@@ -1,21 +1,32 @@
 import { Card, Col, Form, Row, Select, Button, InputNumber } from "antd";
 import * as d3 from 'd3';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { colorScale } from '../utils/colors.js';
+import { lineClass, nodeClass, pointId } from '../utils/nodes.js';
+import { PARAM_LIMITS } from '../config.js';
 import LassoSelection from '../utils/lasso.js';
 import Tooltip from '../utils/tooltip.js';
 
 const { Option } = Select;
 
+// Resting and hovered radii for a point. Kept as constants because the hover-out
+// handler has to restore exactly the resting value; a mismatch made every
+// hovered point grow permanently.
+const POINT_RADIUS = 4;
+const POINT_RADIUS_HOVER = 8;
+
+// Fixed plot geometry and the opacities used to fade unselected points. These
+// were state that was never set.
+const SIZE = { width: 300, height: 300 };
+const MARGIN = { top: 10, right: 20, bottom: 20, left: 20 };
+const OPACITY_SELECTED = 1;
+const OPACITY_MUTED = 0.4;
+
 const DRView = ({ data, type, selectedPoints, nodeClusterMap, handleRecompute, updateSelectedNodes, nNeighbors, minDist, numClusters }) => {
     const svgContainerRef = useRef();
-    const [size, setSize] = useState({ width: 300, height: 300});
-    const [margin, setMargin] = useState({ top: 10, right: 20, bottom: 20, left: 20 });
     const [localNNeighbors, setLocalNNeighbors] = useState(nNeighbors);
     const [localMinDist, setLocalMinDist] = useState(minDist);
     const [localNumClusters, setLocalNumClusters] = useState(numClusters);
-    const [highlight, setHighlight] = useState(1);
-    const [nonHighlight, setNonHighlight] = useState(0.4);
     const [tooltip, setTooltip] = useState({
               visible: false,
               content: '',
@@ -23,96 +34,120 @@ const DRView = ({ data, type, selectedPoints, nodeClusterMap, handleRecompute, u
               y: 0
           });
 
-    function getIdVal(d) {
-        return (type === 'feature') ? d.Measurement : d.nodeId;
-      }
+    const getIdVal = useCallback(
+        (d) => (type === 'feature' ? d.Measurement : d.nodeId),
+        [type]
+    );
 
+    // Mirror parent-owned parameters into the form. Without this the inputs keep
+    // showing the previous dataset's values after a swap or a defaults reset.
+    useEffect(() => { setLocalNNeighbors(nNeighbors); }, [nNeighbors]);
+    useEffect(() => { setLocalMinDist(minDist); }, [minDist]);
+    useEffect(() => { setLocalNumClusters(numClusters); }, [numClusters]);
+
+    // Create the SVG shell once. Points themselves are drawn by the join below.
     useEffect(() => {
-        if (!svgContainerRef.current || !data ) return;
+        if (!svgContainerRef.current) return undefined;
 
-        // NOTE: this currently does nothing as 1) setSize() runs after this useEffect() runs,
-        //       and 2) this useEffect() does not depend on Size. 
-        // const { w, h } = svgContainerRef.current.getBoundingClientRect();
-        // setSize({ w, h });
-        
-        const width = size.width;
-        const height = size.height;
-
-        const xKey = 'E1';
-        const yKey = 'E2';
-
-        const xScale = d3.scaleLinear()
-            .domain([d3.min(data, d => +d[xKey]) - 1, d3.max(data, d => +d[xKey]) + 1])
-            .range([0, width - margin.right]);
-
-        const yScale = d3.scaleLinear()
-            .domain([d3.min(data, d => +d[yKey]) - 1, d3.max(data, d => +d[yKey]) + 1])
-            .range([height - margin.bottom, margin.top]);
-        
         const svg = d3.select(svgContainerRef.current)
           .append("svg")
           .attr('id', `dr-chart-svg-${type}`)
           .attr("width", "100%")
           .attr("height", "100%")
-          .attr("viewBox", `0 0 ${size.width} ${size.height}`)
+          .attr("viewBox", `0 0 ${SIZE.width} ${SIZE.height}`)
           .attr("preserveAspectRatio", "xMidYMid meet")
           .style("border", "1px solid #dddddd")
           .style("border-radius", "6px");
 
-          const zoomLayer = svg.append("g")
-          .attr("class", "zoom-layer");
+        const zoomLayer = svg.append("g").attr("class", "zoom-layer");
 
-        let circs = zoomLayer.selectAll(".dr-circle")
-            .data(data)
-            .enter()
-            .append("circle")
-            .attr("class", (d, i) => "dr-circle")
-            .attr('id', d => getIdVal(d))
-            .attr("cx", d => xScale(d[xKey]))
-            .attr("cy", d => yScale(d[yKey]))
-            .attr('stroke','black')
-            .attr('stroke-width', '1px')
-            .attr("r", 4)
-            .style('fill', d => colorScale(nodeClusterMap.get(d.nodeId)))
-            .style("opacity", d => {
-                return selectedPoints.includes(d.nodeId) ? highlight : nonHighlight;
-            })
-            .attr("_prevOpacity", d => {
-                return selectedPoints.includes(d.nodeId) ? highlight : nonHighlight;
-            })
+        const zoom = d3.zoom()
+            .scaleExtent([0.5, 10])
+            .filter(event => event.type === "wheel")
+            .on("zoom", (event) => zoomLayer.attr("transform", event.transform));
+
+        svg.call(zoom);
+
+        return () => { svg.remove(); };
+    }, [type]);
+
+    // Draw/update points. A keyed join (rather than the previous update-only
+    // pass) means nodes appearing or disappearing — on a dataset swap or a
+    // streamed batch — are added and removed instead of leaving stale marks.
+    useEffect(() => {
+        if (!svgContainerRef.current || !data?.length) return;
+
+        const svg = d3.select(svgContainerRef.current).select("svg");
+        const zoomLayer = svg.select(".zoom-layer");
+        if (zoomLayer.empty()) return;
+
+        const xKey = 'E1';
+        const yKey = 'E2';
+
+        // Pad the extent so points never sit flush against the border.
+        const [xMin, xMax] = d3.extent(data, d => +d[xKey]);
+        const [yMin, yMax] = d3.extent(data, d => +d[yKey]);
+        const xPad = ((xMax - xMin) || 1) * 0.05;
+        const yPad = ((yMax - yMin) || 1) * 0.05;
+
+        const xScale = d3.scaleLinear()
+            .domain([xMin - xPad, xMax + xPad])
+            .range([MARGIN.left, SIZE.width - MARGIN.right]);
+
+        const yScale = d3.scaleLinear()
+            .domain([yMin - yPad, yMax + yPad])
+            .range([SIZE.height - MARGIN.bottom, MARGIN.top]);
+
+        svg.node().xScale = xScale;
+        svg.node().yScale = yScale;
+
+        const isSelected = (d) => (
+            selectedPoints.length === 0 || selectedPoints.includes(getIdVal(d))
+        );
+
+        zoomLayer.selectAll(".dr-circle")
+            .data(data, getIdVal)
+            .join(
+                enter => enter.append("circle")
+                    .attr("class", d => `dr-circle ${nodeClass(d.nodeId)}`)
+                    .attr('id', d => pointId(getIdVal(d)))
+                    .attr("cx", d => xScale(+d[xKey]))
+                    .attr("cy", d => yScale(+d[yKey]))
+                    .attr('stroke', 'black')
+                    .attr('stroke-width', '1px')
+                    .attr("r", POINT_RADIUS)
+                    .style('fill', d => colorScale(nodeClusterMap.get(d.nodeId)))
+                    .style("opacity", 0)
+                    .call(sel => sel.transition().duration(800)
+                        .style("opacity", d => (isSelected(d) ? OPACITY_SELECTED : OPACITY_MUTED))),
+                update => update
+                    .call(sel => sel.transition().duration(800)
+                        .attr("cx", d => xScale(+d[xKey]))
+                        .attr("cy", d => yScale(+d[yKey]))
+                        .style('fill', d => colorScale(nodeClusterMap.get(d.nodeId)))),
+                exit => exit.call(sel => sel.transition().duration(300)
+                    .style("opacity", 0).remove())
+            )
             .on("mouseover", function (event, d) {
-                let circle = d3.select(this)
+                const line = lineClass(d.nodeId);
 
-                circle.attr("_prevOpacity", circle.style("opacity"));
+                d3.select(this)
+                    .transition().duration(150)
+                    .attr("r", POINT_RADIUS_HOVER)
+                    .style("opacity", OPACITY_SELECTED);
 
-                circle
-                    .transition()
-                    .duration(150)
-                    .attr("r", 8)
-                    .style("opacity", highlight)
-
-                // highlighting mrdmd cell 
-                d3.selectAll(`.node-${d.nodeId}`)
-                    .transition()
-                    .duration(150)
+                // highlighting the matching heatmap cell
+                d3.selectAll(`.${nodeClass(d.nodeId)}`)
+                    .transition().duration(150)
                     .style("stroke", "black")
                     .style("stroke-width", 2);
 
-                // highlighting time series
-                let lines = d3.selectAll(".line-svg").selectAll("path.line");
-                lines.each(function(lineData) {
-                    if (lineData[0] === d.nodeId) {
-                        d3.select(this)
-                            .transition()
-                            .duration(150)
-                            .style("opacity", 1)
-                    } else {
-                        d3.select(this)
-                            .transition()
-                            .duration(150)
-                            .style("opacity", 0.1); 
-                    }
-                });
+                // highlighting the matching time series
+                d3.selectAll("path.line")
+                    .transition().duration(150)
+                    .style("opacity", function () {
+                        return d3.select(this).classed(line) ? 1 : 0.1;
+                    });
 
                 setTooltip({
                     visible: true,
@@ -122,103 +157,24 @@ const DRView = ({ data, type, selectedPoints, nodeClusterMap, handleRecompute, u
                 });
             })
             .on("mouseout", function (event, d) {
-                let circle = d3.select(this)
+                d3.select(this)
+                    .transition().duration(150)
+                    .attr("r", POINT_RADIUS)
+                    .style("opacity", isSelected(d) ? OPACITY_SELECTED : OPACITY_MUTED);
 
-                let prevOpacity = circle.attr("_prevOpacity") || nonHighlight; 
-                circle.transition()
-                    .duration(150)
-                    .attr("r", 5)
-                    .style("opacity", prevOpacity);
-
-                d3.selectAll(`.node-${d.nodeId}`)
-                    .transition()
-                    .duration(150)
-                    .style("stroke", "none") // Remove border
+                d3.selectAll(`.${nodeClass(d.nodeId)}`)
+                    .transition().duration(150)
+                    .style("stroke", "none")
                     .style("stroke-width", 0);
 
-                let lines = d3.selectAll(".line-svg").selectAll("path.line");
-
-                // Resetting all line styles
-                lines.transition()
-                    .duration(150)
+                d3.selectAll("path.line")
+                    .transition().duration(150)
                     .style("stroke-width", 1)
-                    .style("opacity", highlight)
+                    .style("opacity", OPACITY_SELECTED);
 
-                setTooltip(prev => ({
-                    ...prev,
-                    visible: false,
-                }));
-            })
-            .style('opacity', 0);
-
-            circs
-                .transition()
-                .duration(800)
-                .style("opacity", d => {
-                    const idVal = getIdVal(d);
-                    return selectedPoints.includes(idVal) ? highlight : nonHighlight;
-                })
-
-            svg.node().xScale = xScale;
-            svg.node().yScale = yScale;
-
-            const zoom = d3.zoom()
-            .scaleExtent([0.5, 10])
-            .filter(event => event.type === "wheel")   
-            .on("zoom", (event) => {
-              zoomLayer.attr("transform", event.transform);
+                setTooltip(prev => ({ ...prev, visible: false }));
             });
-        
-            svg.call(zoom);
-    
-        return () => {
-            svg.remove();
-        };
-        
-    }, [type]);
-
-    // scatter plot update
-    useEffect(() => {
-        if (!data || data.length === 0 || !svgContainerRef.current) return;
-
-        const svg = d3.select(svgContainerRef.current).select("svg");
-        const xKey = 'E1';
-        const yKey = 'E2';
-
-        // const xScale = svg.node()?.xScale;
-        // const yScale = svg.node()?.yScale;
-        // if (!xScale || !yScale) return;
-
-        // recalculating bounds with padding
-        const xExtent = d3.extent(data, d => +d[xKey]);
-        const yExtent = d3.extent(data, d => +d[yKey]);
-
-        const xScale = d3.scaleLinear()
-            .domain([xExtent[0], xExtent[1]])
-            .range([0, size.width - margin.right]);
-
-        const yScale = d3.scaleLinear()
-            .domain([yExtent[0], yExtent[1]])
-            .range([size.height - margin.bottom, margin.top]);
-
-        // Store updated scales on SVG
-        svg.node().xScale = xScale;
-        svg.node().yScale = yScale;
-
-        // animating existing points to new positions
-        svg.selectAll(".dr-circle")
-            .data(data, d => getIdVal(d))  
-            .transition()
-            .duration(1000)
-            .attr("cx", d => xScale(+d[xKey]))
-            .attr("cy", d => yScale(+d[yKey]));
-
-    }, [data]);
-
-    useEffect(() => {
-        d3.select(".zoom-layer").selectAll(".dr-circle")
-            .style('fill', d => colorScale(nodeClusterMap.get(d.nodeId)))
-    }, [nodeClusterMap]);
+    }, [data, nodeClusterMap, selectedPoints, getIdVal]);
 
     useEffect(() => {
         d3.select(svgContainerRef.current)
@@ -228,12 +184,11 @@ const DRView = ({ data, type, selectedPoints, nodeClusterMap, handleRecompute, u
             .style("opacity", d => {
                 const idVal = getIdVal(d);
                 if (selectedPoints.includes(idVal) || selectedPoints.length === 0) {
-                    return highlight;
-                } else {
-                    return nonHighlight;
+                    return OPACITY_SELECTED;
                 }
+                return OPACITY_MUTED;
             });
-    }, [selectedPoints]);
+    }, [selectedPoints, getIdVal]);
 
     // Lasso selection
     const handleSelection = (selected) => {
@@ -242,17 +197,21 @@ const DRView = ({ data, type, selectedPoints, nodeClusterMap, handleRecompute, u
         chart.selectAll('.dr-circle')
             .style("opacity", d => {
                 const idVal = getIdVal(d);
-                if (selected.includes(idVal) || selected.length == 0) {
-                    return highlight; 
+                if (selected.includes(idVal) || selected.length === 0) {
+                    return OPACITY_SELECTED; 
                 } else {
-                    return nonHighlight;
+                    return OPACITY_MUTED;
                 }
         });
 
         updateSelectedNodes(selected);
     };
 
-    const clusterOptions = Array.from({ length: 19 }, (_, i) => i + 2); // [2..20]
+    const { numClusters: clusterLimits, nNeighbors: neighborLimits, minDist: distLimits } = PARAM_LIMITS;
+    const clusterOptions = Array.from(
+        { length: clusterLimits.max - clusterLimits.min + 1 },
+        (_, i) => i + clusterLimits.min
+    );
 
     return (
         <>
@@ -289,7 +248,6 @@ const DRView = ({ data, type, selectedPoints, nodeClusterMap, handleRecompute, u
                             <Form
                                 layout="horizontal"
                                 colon={false}
-                                initialValues={{numClusters: localNumClusters}}
                                 style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}
                             >
                             <Form.Item
@@ -299,10 +257,10 @@ const DRView = ({ data, type, selectedPoints, nodeClusterMap, handleRecompute, u
                                 style={{ marginBottom: '4px' }}
                             >
                                 <InputNumber
-                                    min={3}
-                                    max={50}
-                                    step={1}
-                                    defaultValue={localNNeighbors}
+                                    min={neighborLimits.min}
+                                    max={neighborLimits.max}
+                                    step={neighborLimits.step}
+                                    value={localNNeighbors}
                                     onChange={(val) => setLocalNNeighbors(val)}
                                     style={{ width: '100%' }}
                                 />
@@ -315,18 +273,20 @@ const DRView = ({ data, type, selectedPoints, nodeClusterMap, handleRecompute, u
                                 style={{ marginBottom: '4px' }}
                             >
                                 <InputNumber
-                                    min={0.0}
-                                    max={1.0}
-                                    step={0.1}
-                                    defaultValue={localMinDist}
+                                    min={distLimits.min}
+                                    max={distLimits.max}
+                                    step={distLimits.step}
+                                    value={localMinDist}
                                     onChange={(val) => setLocalMinDist(val)}
                                     style={{ width: '100%' }}
                                 />
                             </Form.Item>
                             {/* K-Means */}
                             <p style={{ margin: 0, fontWeight: 'bold' }}>K-Means:</p>
+                            {/* Not bound to the Form by name: antd would then own the
+                                value and ignore the controlled `value` below, which
+                                left the dropdown stale after a reset. */}
                             <Form.Item
-                                name="numClusters"
                                 label="Num clusters"
                                 labelCol={{ span: 15 }}
                                 wrapperCol={{ span: 14 }}
@@ -367,9 +327,9 @@ const DRView = ({ data, type, selectedPoints, nodeClusterMap, handleRecompute, u
                             <Button
                                 size="small"
                                 onClick={() => {
-                                    setLocalNNeighbors(15);
-                                    setLocalMinDist(0.3);
-                                    setLocalNumClusters(4);
+                                    // The parent owns the dataset's defaults; ask it to
+                                    // restore them and mirror whatever it settles on
+                                    // rather than guessing fixed numbers here.
                                     handleRecompute?.(localNumClusters, localNNeighbors, localMinDist, true, true);
                                 }}
                             >

@@ -10,52 +10,47 @@
 - Python3
 - Note: Tested on macOS Tahoe and Ubuntu 24.04 LTS.
 
+An anonymized sample dataset ships with the repo, so a fresh clone runs without
+supplying any data of your own.
+
 ### Frontend (React)
 
 ### Setup
 
-1. Open a terminal
-2. Run `cd ui`
-3. Ensure Node 24+ is active:
+1. In a terminal, run `cd ui`
+2. Ensure Node 24+ is active:
    1. NVM: `nvm use 24` or `nvm install 24` if not installed
-4. `npm install`
+3. `npm install`
+4. `cp .env.example .env.development` to point the app at the API
 
 ### Usage
 
-1. Open terminal
-2. `cd ui`
-3. `npm run start`
+1. `cd ui`
+2. `npm run start`
 
 ## Backend (Flask)
 
 ### Setup
 
-1. Open a second terminal
-2. Run `cd server`
-3. Ensure you're using Python 3.13. If you have `pyenv` installed, it should automatically switch Python versions when you `cd` into `server/`.
-4. `python -m venv .venv`
-5. `source .venv/bin/activate` (Repeat this whenever you start a new terminal)
-6. `pip install -r requirements.txt`
-7. Install CCPCA package
+1. In a terminal, run `cd server`
+2. Ensure you're using Python 3.13. If you have `pyenv` installed, it should automatically switch Python versions when you `cd` into `server/`.
+3. `python -m venv .venv`
+4. `source .venv/bin/activate` (Repeat this whenever you start a new terminal)
+5. `pip install -r requirements.txt`
+6. Install CCPCA package
 
    1. Options:
       1. Clone the repo:`git clone https://github.com/takanori-fujiwara/ccpca.git`, follow instructions in the README.md file
       2. Run `pip install ccpca`
-8. Add data to server/data/
+7. Add data to server/data/
 
-   1. Format (csv):
-
-   | timestamp           | nodeId | metric_1 | metric_2 | metric_n |
-   | ------------------- | ------ | -------- | -------- | -------- |
-   | MM-DD-YYYY HH:mm:ss | node0  | ...      | ...      | ...      |
-   | MM-DD-YYYY HH:mm:ss | node1  | ...      | ...      | ...      |
+   1. See server/data/sample_metrics.csv for format
 
 ### Usage
 
-1. Open terminal
-2. `cd server`
-3. `source .venv/bin/activate`
-4. `python server.py`
+1. `cd server`
+2. `source .venv/bin/activate`
+3. `python server.py`
 
 ## References
 
@@ -65,4 +60,5 @@
 
 ### Citation
 
-Allison Austin, Shilpika, Yan To Linus Lam, Yun-Hsin Kuo, Venkatram Vishwanath, Michael E. Papka, & Kwan-Liu Ma (2026). Understanding Large-Scale HPC System Behavior Through Cluster-Based Visual Analytics. arXiv. https://doi.org/10.48550/arXiv.2604.11965
+Allison Austin, Shilpika, Yan To Linus Lam, Yun-Hsin Kuo, Venkatram Vishwanath, Michael E. Papka, Kwan-Liu Ma. Understanding Large-Scale HPC System Behavior
+Through Cluster-Based Visual Analytics. ISC High Performance 2026 Research Paper Proceedings (41st International Conference), 2026, pp. 1-12, doi: 10.23919/ISC.2026.11520496.

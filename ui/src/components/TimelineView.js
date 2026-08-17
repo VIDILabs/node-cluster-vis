@@ -1,24 +1,17 @@
 import { Card } from "antd";
 import * as d3 from 'd3';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { colorScale, COLORS } from '../utils/colors.js';
-import Tooltip from '../utils/tooltip.js';
+
+// Fixed chart insets; these never varied at runtime.
+const MARGIN = { top: 5, right: 10, bottom: 20, left: 50 };
 
 const TimelineView = ({ data, bStart, bEnd, nodeDataStart, nodeDataEnd, nodeClusterMap }) => {
     const svgContainerRef = useRef();
-    const xScaleRef = useRef(null); 
     const [brushStart, setBrushStart] = useState(new Date(bStart));
     const [brushEnd, setBrushEnd] = useState(new Date(bEnd));
-    const [binWidth, setBinWidth] = useState(15 * 60 * 1000) // default: 15 min
-    const [margin, setMargin] = useState({ top: 5, right: 10, bottom: 20, left: 50 });
-    const [tooltip, setTooltip] = useState({
-          visible: false,
-          content: '',
-          x: 0,
-          y: 0
-      });
 
-    const drawChart = (data) => {
+    const drawChart = useCallback((data) => {
       d3.select(svgContainerRef.current).selectAll("*").remove();
 
       const container = svgContainerRef.current;
@@ -37,12 +30,12 @@ const TimelineView = ({ data, bStart, bEnd, nodeDataStart, nodeDataEnd, nodeClus
       const xScale = d3
         .scaleTime()
         .domain([new Date(nodeDataStart), new Date(nodeDataEnd)])
-        .range([margin.left, width - margin.right - margin.left])
+        .range([MARGIN.left, width - MARGIN.right - MARGIN.left])
       
       const yScale = d3
         .scaleBand()
         .domain(data.map(d => d.cluster))
-        .range([margin.top, height- margin.bottom])
+        .range([MARGIN.top, height- MARGIN.bottom])
         .padding(0.4);
 
       const xAxis = d3.axisBottom(xScale).tickFormat(d3.timeFormat("%H:%M"));
@@ -50,14 +43,14 @@ const TimelineView = ({ data, bStart, bEnd, nodeDataStart, nodeDataEnd, nodeClus
 
       svg.append("g")
         .attr('class', 'x-axis')
-        .attr("transform", `translate(0,${height - margin.bottom})`)
+        .attr("transform", `translate(0,${height - MARGIN.bottom})`)
         .call(xAxis)
         .selectAll("text")
           .style("font-size", "12px");
       
       const yAxisGroup = svg.append("g")
         .attr('class', 'y-axis')
-        .attr("transform", `translate(${margin.left}, 0)`)
+        .attr("transform", `translate(${MARGIN.left}, 0)`)
         .call(yAxis.tickFormat(d => `c${d}`));
 
       yAxisGroup.selectAll("text")
@@ -98,8 +91,8 @@ const TimelineView = ({ data, bStart, bEnd, nodeDataStart, nodeDataEnd, nodeClus
 
       const brush = d3.brushX(xScale)
         .extent([
-          [Math.max(margin.left, earliestNodeDataTime), margin.top],
-          [width - margin.right - 20, height - margin.bottom - 1]
+          [Math.max(MARGIN.left, earliestNodeDataTime), MARGIN.top],
+          [width - MARGIN.right - 20, height - MARGIN.bottom - 1]
         ])
         .on('end', (event) => {
             const selection = event.selection;
@@ -115,18 +108,17 @@ const TimelineView = ({ data, bStart, bEnd, nodeDataStart, nodeDataEnd, nodeClus
     
         svg.append('g')
           .attr('class', 'x-brush')
-          //.attr('transform', `translate(0, ${-margin.top})`)
+          //.attr('transform', `translate(0, ${-MARGIN.top})`)
           .call(brush)
           .call(brush.move, defaultWindow)
-    };
+    }, [brushStart, brushEnd, nodeDataStart, nodeDataEnd]);
     
     useEffect(() => {
       if (!svgContainerRef.current || !data || !nodeDataStart || !nodeDataEnd ) return;
       drawChart(data);
-    }, [data, nodeClusterMap]);
+    }, [data, nodeClusterMap, nodeDataStart, nodeDataEnd, drawChart]);
 
     return  (
-      <>
         <Card title="TIME DOMAIN VIEW" size="small" style={{ height: 'auto', width: '100%' }}>
            <div style={{ 
               display: 'flex', 
@@ -147,14 +139,6 @@ const TimelineView = ({ data, bStart, bEnd, nodeDataStart, nodeDataEnd, nodeClus
             </div>
             <div ref={svgContainerRef} style={{ width: '100%', height: '100px' }}></div>
         </Card>
-        <Tooltip
-          visible={tooltip.visible}
-          content={tooltip.content}
-          x={tooltip.x}
-          y={tooltip.y}
-          tooltipId={'tl-tooltip'}
-      />
-    </>
     );
   };
     

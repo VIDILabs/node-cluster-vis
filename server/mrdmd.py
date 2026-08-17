@@ -4,18 +4,27 @@ from timeit import default_timer as timer
 import numpy as np
 import pandas as pd
 import sys
-sys.path.append("./scripts/src/")
+
+import config
+
+# Resolve relative to this file so the server can be started from any directory.
+sys.path.append(os.path.join(config.BASE_DIR, 'scripts', 'src'))
 import mrdmd_zscore
 
-ml = 9
-step = 10000
+ml = config.MRDMD_MAX_LEVELS
+step = config.MRDMD_STEP
 std_baselines_dict = {}
-CACHE_DIR = './scripts/cache/'
-ZSC_B_CACHE_NAME = CACHE_DIR + 'mrDMDbaselineZscores.parquet'
-ZSC_CACHE_NAME = CACHE_DIR + 'mrDMDbaselineData.parquet'
+NODE = config.NODE_COLUMN
+TIME = config.TIME_COLUMN
+
+
+def _baseline_cache_path(dataset_key):
+    config.ensure_dirs()
+    return os.path.join(config.CACHE_DIR, f'mrdmd_baseline_{dataset_key}.parquet')
+
 
 def preprocess(df, col):
-    return df.pivot(index="nodeId", columns="timestamp", values=col) \
+    return df.pivot(index=NODE, columns=TIME, values=col) \
                 .apply(pd.to_numeric, errors='coerce') \
                 .ffill(axis='rows') \
                 .bfill(axis='rows')
@@ -73,9 +82,7 @@ def find_time_range(df, lower, upper):
 def process_baseline(df, col, bmin, bmax, sob, eob):
     # TODO: save new baseline to cache
     Z_final = []
-    ml = 9
-    step = 10000
-    df_col = df.pivot(index="nodeId", columns="timestamp", values=col) \
+    df_col = df.pivot(index=NODE, columns=TIME, values=col) \
                 .apply(pd.to_numeric, errors='coerce') \
                 .ffill(axis='rows') \
                 .bfill(axis='rows')
@@ -134,8 +141,6 @@ def process_baseline(df, col, bmin, bmax, sob, eob):
 
 def process_columns_baseline(df):
     Z_final = []
-    ml = 9
-    step = 10000
 
     def process_single_column(col):
         # computing upper and lower baseline value range
@@ -146,7 +151,7 @@ def process_columns_baseline(df):
             bmin = 0 if (mean - std) < 0 else mean - std
             bmax = mean + std
 
-        df_col = df.pivot(index="nodeId", columns="timestamp", values=col) \
+        df_col = df.pivot(index=NODE, columns=TIME, values=col) \
                     .apply(pd.to_numeric, errors='coerce') \
                     .ffill(axis='rows') \
                     .bfill(axis='rows')
@@ -204,8 +209,8 @@ def process_columns_baseline(df):
         })
         Z_final.append(std_baselines_df)
 
-    cols_df = df.drop(columns=['nodeId', 'timestamp'])
-    with ThreadPoolExecutor(max_workers=15) as executor:
+    cols_df = df.drop(columns=[NODE, TIME])
+    with ThreadPoolExecutor(max_workers=config.MRDMD_MAX_WORKERS) as executor:
         executor.map(process_single_column, cols_df.columns)
     
     Z_final = pd.concat(Z_final, ignore_index=True) if Z_final else pd.DataFrame(columns=["feature", "b_start", "b_end", "v_min", "v_max", "z_score"])
@@ -226,9 +231,9 @@ def extract_baselines(df, nbase_df, baselines, col):
     t_end = pd.to_datetime(nbase_df.columns[-1])
     t_diff = t_end - t_start
 
-    base_df = df[(pd.to_datetime(df['timestamp']) >= b_start) \
-               & (pd.to_datetime(df['timestamp']) <= b_end)] \
-                .pivot(index="nodeId", columns="timestamp", values=col) \
+    base_df = df[(pd.to_datetime(df[TIME]) >= b_start) \
+               & (pd.to_datetime(df[TIME]) <= b_end)] \
+                .pivot(index=NODE, columns=TIME, values=col) \
                 .apply(pd.to_numeric, errors='coerce') \
                 .ffill(axis='rows') \
                 .bfill(axis='rows')
@@ -247,8 +252,6 @@ def extract_baselines(df, nbase_df, baselines, col):
 
 def compute_zscores(df, baselines):
     Z_final = []
-    ml = 9
-    step = 10000
     
     def process_single_feature(col):
         # non-baselines
@@ -289,12 +292,12 @@ def compute_zscores(df, baselines):
                                     plot=False)
         
         values = zsc[0][:len(nodelist)]
-        Z_df = pd.DataFrame({"nodeId": nodelist, col: values})
+        Z_df = pd.DataFrame({NODE: nodelist, col: values})
         return Z_df
 
-    cols_df = df.drop(columns=['nodeId', 'timestamp'])
+    cols_df = df.drop(columns=[NODE, TIME])
     results = []
-    with ThreadPoolExecutor(max_workers=15) as executor:
+    with ThreadPoolExecutor(max_workers=config.MRDMD_MAX_WORKERS) as executor:
         futures = [executor.submit(process_single_feature, col) for col in cols_df.columns]
         for future in futures:
             res = future.result()
@@ -303,56 +306,58 @@ def compute_zscores(df, baselines):
 
     if not results:
         print("Warning: No valid z-score results to concatenate.")
-        return pd.DataFrame(columns=['nodeId'])
+        return pd.DataFrame(columns=[NODE])
 
     Z_final = pd.concat(results, axis=1)
     cols = Z_final.columns
-    if 'nodeId' in cols:
+    if NODE in cols:
         Z_final = Z_final.loc[:, ~Z_final.columns.duplicated()]
     return Z_final
 
-def get_cached_or_compute_baselines(df, force_recompute):
-    if os.path.exists(ZSC_B_CACHE_NAME) and force_recompute == 0:
+def get_cached_or_compute_baselines(df, dataset_key, force_recompute):
+    """Baseline z-scores, computed once per (dataset, metric) and reused.
+
+    Only metrics missing from the cache are computed, so selecting an extra
+    metric costs one baseline rather than a full recomputation.
+    """
+    cache_path = _baseline_cache_path(dataset_key)
+    if os.path.exists(cache_path) and not force_recompute:
         print('Reading cached baseline z-scores from parquet')
-        ZSC_d = pd.read_parquet(ZSC_B_CACHE_NAME)
+        ZSC_d = pd.read_parquet(cache_path)
     else:
-        ZSC_d = pd.DataFrame()  # Empty DataFrame if cache doesn't exist or force_recompute == 1
+        ZSC_d = pd.DataFrame()  # Empty DataFrame if cache doesn't exist or a recompute was forced
 
     # Extract existing features in the cache
     cached_features = set(ZSC_d['feature']) if not ZSC_d.empty else set()
-    
+
     # Extract features from df
-    df_features = set(df.columns) - {'nodeId', 'timestamp'}
-    
+    df_features = set(df.columns) - {NODE, TIME}
+
     # Find missing features that need computation
     missing_features = df_features - cached_features
 
     if missing_features:
-        # print(f'Computing baselines for missing features: {missing_features}')
-        missing_df = df[['nodeId', 'timestamp'] + list(missing_features)]
+        missing_df = df[[NODE, TIME] + list(missing_features)]
         bs_start = timer()
         new_baselines = process_columns_baseline(missing_df)
         bs_end = timer()
         print(f'baseline in {(bs_end - bs_start)}s')
 
-        
         # Append new baselines to cached ones
         if not new_baselines.empty:
             if not ZSC_d.empty:
-                ZSC_d = pd.concat([ZSC_d, new_baselines], ignore_index=True) 
+                ZSC_d = pd.concat([ZSC_d, new_baselines], ignore_index=True)
             else:
                 ZSC_d = new_baselines
 
-        # Save updated baselines
-        os.makedirs(CACHE_DIR, exist_ok=True)
-        ZSC_d.to_parquet(ZSC_B_CACHE_NAME)
-        print(f'Updated cached baseline results to parquet {ZSC_B_CACHE_NAME} (missing features).')
+        ZSC_d.to_parquet(cache_path)
+        print(f'Cached baselines for {len(missing_features)} new metric(s).')
 
     return ZSC_d
 
-def get_mrdmd(df, force_recompute):
+def get_mrdmd(df, dataset_key, force_recompute):
     # Step 1: Compute z-scores for baselines or get them from cache
-    Z_b = get_cached_or_compute_baselines(df, force_recompute)
+    Z_b = get_cached_or_compute_baselines(df, dataset_key, force_recompute)
 
     # Step 2: Compute z-scores for the node selection compared to baseline z-scores
     mr_dmdstart = timer()
