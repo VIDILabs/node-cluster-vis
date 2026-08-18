@@ -2,18 +2,17 @@
 
 ## About
 
-This system combines visualization+analysis techniques to assess multivariate time series data from HPC monitoring systems (NovADAQ at FNAL and Theta at ANL). We implement:
+This system combines visualization+analysis techniques to assess multivariate time series data from HPC monitoring systems (NOvADAQ deployed at the Near and Far Detectors from FNAL and SEDC deployed at Theta supercomputer from ANL). We developed this visual analytics system to explore/analyze these datasets for the purposes of node behavior detection and hardware anomaly identification. To achieve this, we implement:
 
 - *Intra-cluster* analysis: Two-step DR (PCA+UMAP) across time and metric domains with contrastive clusters for feature contributions.
 - *Inter-cluster* analysis: Interactive mrDMD to adjust metric baselines and compute per-node devation from baseline(s).
+
+We have included an anonymized sample dataset for exploring the interface without needing to supply your own data. More details on this project can be found in our paper [1].
 
 ## Requirements
 
 - Python3
 - Note: Tested on macOS Tahoe and Ubuntu 24.04 LTS.
-
-An anonymized sample dataset ships with the repo, so a fresh clone runs without
-supplying any data of your own.
 
 ### Frontend (React)
 
@@ -62,5 +61,5 @@ supplying any data of your own.
 
 ### Citation
 
-Allison Austin, Shilpika, Yan To Linus Lam, Yun-Hsin Kuo, Venkatram Vishwanath, Michael E. Papka, Kwan-Liu Ma. Understanding Large-Scale HPC System Behavior
+[1] Allison Austin, Shilpika, Yan To Linus Lam, Yun-Hsin Kuo, Venkatram Vishwanath, Michael E. Papka, Kwan-Liu Ma. Understanding Large-Scale HPC System Behavior
 Through Cluster-Based Visual Analytics. ISC High Performance 2026 Research Paper Proceedings (41st International Conference), 2026, pp. 1-12, doi: 10.23919/ISC.2026.11520496.
