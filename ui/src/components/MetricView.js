@@ -4,8 +4,9 @@ import { Switch, Space } from 'antd';
 import LineChart from './LineChart.js';
 import api from '../api.js';
 import { colorScale, COLORS } from '../utils/colors.js';
+import { CHART_FONT } from '../config.js';
 
-const MetricView = ({ data, timeRange, selectedDims, selectedPoints, zScores, setzScores, setBaselines, baselines, baselinesRef, nodeClusterMap, headerMap }) => {
+const MetricView = ({ data, timeRange, selectedDims, selectedPoints, zScores, setzScores, setBaselines, baselines, baselinesRef, nodeClusterMap, headerMap, hiddenClusters }) => {
     const chartsRef = useRef([]);
     const selectedTimeRange = timeRange;
     const [showBaselines, setShowBaselines] = useState(true);
@@ -13,7 +14,6 @@ const MetricView = ({ data, timeRange, selectedDims, selectedPoints, zScores, se
     useEffect(() => {
       const handleTimeDomainUpdate = (event) => {
         const newDomain = event.detail;
-        const [start, end] = newDomain;
 
         chartsRef.current.forEach(({ chartEl, xScale, yScale, lines, field, brushGroup }) => {
           if (!chartEl || !lines) return;
@@ -24,21 +24,19 @@ const MetricView = ({ data, timeRange, selectedDims, selectedPoints, zScores, se
             .call(d3.axisBottom(xScale)
             .ticks(6)
             .tickFormat(d3.timeFormat("%H:%M")))
-            .selectAll("text").style("font-size", "16px");
+            .selectAll("text").style("font-size", `${CHART_FONT.axis}px`);
 
           const lineGenerator = d3.line()
             .x(p => xScale(new Date(p.timestamp)))
             .y(p => yScale(p.value));
 
-          lines.attr('d', d => {
-            if (!d || !d[1]) return null;
-            
-            const filteredPoints = d[1].filter(p => {
-                const ts = new Date(p.timestamp);
-                return ts >= start && ts <= end;
-            });
-            return lineGenerator(filteredPoints);
-          });
+          // Every point, not just the ones inside the window. The chart has a
+          // clip path over the plot area, so anything outside is hidden
+          // anyway — and dropping those points made each line begin at the
+          // first sample *inside* the range instead of crossing the boundary,
+          // which left a visible gap between the y-axis and the start of the
+          // data.
+          lines.attr('d', d => (d && d[1] ? lineGenerator(d[1]) : null));
 
           const baseline = baselinesRef.current[field];
           if (baseline && brushGroup) {
@@ -142,11 +140,15 @@ const MetricView = ({ data, timeRange, selectedDims, selectedPoints, zScores, se
 
     if (!data || !baselines) return null;
 
+    // height:100% fills the card; the max-height is a floor under it so a height
+    // chain that fails to resolve scrolls rather than running the charts off the
+    // bottom of the page.
     return (
-      <div style={{ overflow: 'auto', height: "calc(60vh - 40px)", }}>
+      <div style={{ overflow: 'auto', height: '100%', maxHeight: 'calc(100vh - 190px)', minHeight: 0 }}>
         <div style={{ 
           display: 'flex', 
           alignItems: 'center', 
+          flexWrap: 'wrap',
           justifyContent: 'flex-end', 
           marginBottom: '8px', 
           marginRight: '10px',
@@ -186,6 +188,8 @@ const MetricView = ({ data, timeRange, selectedDims, selectedPoints, zScores, se
                     metadata={headerMap[field]}
                     registerChart={registerChart}
                     showBaselines={showBaselines}
+                    selectedPoints={selectedPoints}
+                    hiddenClusters={hiddenClusters}
                 />
             );
         })}

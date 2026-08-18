@@ -59,7 +59,6 @@ const LassoSelection = ({ svgRef, targetItems, onSelect }) => {
 
       // Check if each point is inside the lasso
       let circles = svg.selectAll(targetItems)
-      let lines = d3.selectAll(".line-svg").selectAll("path.line");
       
       // circles.each((d, i) => {
       //   let point = [
@@ -83,16 +82,11 @@ const LassoSelection = ({ svgRef, targetItems, onSelect }) => {
           selectedIds.add(d.nodeId);
         }
       });
+      // An empty lasso means "clear the selection"; the caller decides what
+      // that looks like. Blanking every point to 0.05 here made a stray click
+      // read as the whole embedding disappearing.
       onSelect(Array.from(selectedIds));
-      
-      console.log('selected: ', selectedIds)
-      
-      if (selectedIds.size === 0) { // resetting plot
-        circles
-          .style("opacity", 0.05);
-        lines
-          .style("opacity", 0.05);
-      }
+
       svg.select('#lasso').remove();
       // Reenable mouseover events
       svg.selectAll(".dr-circle").attr('pointer-events', 'auto');

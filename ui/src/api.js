@@ -58,6 +58,11 @@ export const api = {
   clusterAverages: (metrics, binSeconds, maxPoints) =>
     request('/api/cluster-averages', { params: { metrics, binSeconds, maxPoints } }),
 
+  // Per-cluster reporting coverage over time. `nodes` narrows it to a selection;
+  // `metrics` decides which columns count as a reading for the gap row.
+  coverage: (nodes, bins, metrics) =>
+    request('/api/coverage', { params: { nodes, bins, metrics } }),
+
   dr: ({ nNeighbors, minDist, numClusters, force }) =>
     request('/api/dr', {
       params: {

@@ -42,40 +42,54 @@ def compute_value_range(series, k=1.5, ext=0.1):
 
 def find_time_range(df, lower, upper):
     """
-    Finds the longest contiguous time period where all nodes have nonzero values and the values are within the baseline range (lower and upper).
-    Returns the first and last timestamp of this period.
+    Finds the longest contiguous time period where the values are within the
+    baseline range (lower and upper). Returns its first and last timestamp.
+
+    A column counts as in-range when at least ``MRDMD_BASELINE_COVERAGE`` of the
+    nodes fall inside it, rather than every last one. Requiring unanimity does
+    not survive a realistic node count: one outlier anywhere invalidates the
+    whole timestamp, so on the 120-node sample the longest unanimous window for
+    cpu_wio was five columns — too short for mrDMD to decompose, which made the
+    metric disappear from the heatmap entirely. At 90% the same metric gets 20.
+
+    A window shorter than ``MRDMD_MIN_BASELINE_COLUMNS`` is rejected in favour of
+    the full range for the same reason: too few columns and the decomposition has
+    no levels to produce.
     """
+    coverage = config.MRDMD_BASELINE_COVERAGE
+    minimum = config.MRDMD_MIN_BASELINE_COLUMNS
+
+    in_range = ((df >= lower) & (df <= upper)).mean(axis=0) >= coverage
+
     longest_start, longest_end = None, None
-    max_length = 0  # Initialize as integer to represent the longest valid period in terms of indices
+    max_length = 0
     current_start = None
 
-    for i in range(len(df.columns)):
-        # Check if all values in the current column are within the baseline range
-        valid_period = (df.iloc[:, i] >= lower) & (df.iloc[:, i] <= upper)
-        
-        if valid_period.all():  # If the entire column is within the range
+    for i, valid in enumerate(in_range.to_numpy()):
+        if valid:
             if current_start is None:  # Start a new valid period
                 current_start = i
-        else:
-            if current_start is not None:
-                length = i - current_start
-                if length > max_length:  # Update longest period
-                    max_length = length
-                    longest_start, longest_end = current_start, i - 1
-                current_start = None  # Reset for the next sequence
+        elif current_start is not None:
+            length = i - current_start
+            if length > max_length:  # Update longest period
+                max_length = length
+                longest_start, longest_end = current_start, i - 1
+            current_start = None  # Reset for the next sequence
 
     # If the last sequence was the longest, update it
     if current_start is not None:
         length = len(df.columns) - current_start
         if length > max_length:
+            max_length = length
             longest_start, longest_end = current_start, len(df.columns) - 1
 
-    if longest_start is not None and longest_end is not None:
-        start_timestamp = df.columns[longest_start]
-        end_timestamp = df.columns[longest_end]
-        return start_timestamp, end_timestamp
+    if longest_start is not None and max_length >= minimum:
+        return df.columns[longest_start], df.columns[longest_end]
 
-    print("No valid period found within the baseline range.")
+    print(
+        f'Baseline window of {max_length} column(s) is below the {minimum} needed; '
+        'falling back to the full time range.'
+    )
     return pd.to_datetime(df.columns).min(), pd.to_datetime(df.columns).max()
 
 # Running mrdmd on a single column with configured baseline (time and value range)
@@ -211,8 +225,23 @@ def process_columns_baseline(df):
 
     cols_df = df.drop(columns=[NODE, TIME])
     with ThreadPoolExecutor(max_workers=config.MRDMD_MAX_WORKERS) as executor:
-        executor.map(process_single_column, cols_df.columns)
-    
+        futures = {
+            executor.submit(process_single_column, col): col
+            for col in cols_df.columns
+        }
+        for future in futures:
+            try:
+                future.result()
+            except Exception as exc:
+                # The results of executor.map() were never iterated, so anything
+                # raised in a worker vanished without a trace and the metric just
+                # went missing from the heatmap. Report it instead: one metric
+                # failing to produce a baseline should not stop the others, but
+                # it must not be silent either.
+                print(f'[ERROR] Baseline failed for "{futures[future]}": '
+                      f'{type(exc).__name__}: {exc}')
+
+
     Z_final = pd.concat(Z_final, ignore_index=True) if Z_final else pd.DataFrame(columns=["feature", "b_start", "b_end", "v_min", "v_max", "z_score"])
     return Z_final
 

@@ -21,6 +21,7 @@ from sklearn.preprocessing import StandardScaler
 from umap import UMAP
 
 import config
+from params import resolve_umap_params, suggest_k
 
 NODE = config.NODE_COLUMN
 TIME = config.TIME_COLUMN
@@ -159,13 +160,19 @@ def apply_second_dr(df, method, n_neighbors=15, min_dist=0.1):
 
 
 def id_clusters_w_kmeans(df_pivot, k):
-    """Label the 2D embedding. k is clamped so a small node set can't crash k-means."""
+    """Label the 2D embedding.
+
+    ``k <= 0`` asks for automatic selection by silhouette. Otherwise k is clamped
+    so a small node set can't crash k-means. Returns the k actually used.
+    """
+    X = df_pivot[['E1', 'E2']].to_numpy(dtype=float)
+    k = suggest_k(X) if (k is None or int(k) <= 0) else int(k)
     k = int(max(1, min(k, len(df_pivot))))
-    X = df_pivot[['E1', 'E2']]
+
     kmeans = KMeans(n_clusters=k, random_state=config.RANDOM_SEED, n_init=10)
     df_pivot['Cluster'] = kmeans.fit_predict(X)
     df_pivot[NODE] = df_pivot.index
-    return df_pivot
+    return k
 
 
 def feature_columns(df):
@@ -269,7 +276,14 @@ def get_dr_time(df, dataset_key, n_neighbors, min_dist, num_clusters, force_reco
     ``dataset_key`` identifies the rows; DR2 is additionally keyed on the UMAP
     parameters, so changing k alone reuses both cached stages and only re-runs
     k-means — which is what makes the cluster-count control feel instant.
+
+    Returns ``(frame, params)`` where ``params`` reports the values actually
+    used, which is how the client learns what the auto-tuner picked.
     """
+    n_neighbors, min_dist = resolve_umap_params(
+        df[NODE].nunique(), n_neighbors, min_dist
+    )
+
     dr1_token = dataset_key
     dr2_token = f'{dataset_key}_{n_neighbors}_{min_dist}'
 
@@ -285,28 +299,32 @@ def get_dr_time(df, dataset_key, n_neighbors, min_dist, num_clusters, force_reco
     dr2_end = timer()
 
     kmeans_start = timer()
-    id_clusters_w_kmeans(DR2_d, num_clusters)
+    k = id_clusters_w_kmeans(DR2_d, num_clusters)
     kmeans_end = timer()
 
     print(f'DR1 in {dr1_end - dr1_start:.3f}s | DR2 in {dr2_end - dr2_start:.3f}s '
           f'| kMeans in {kmeans_end - kmeans_start:.3f}s | {len(DR2_d)} rows')
-    return DR2_d
+    return DR2_d, {'nNeighbors': n_neighbors, 'minDist': min_dist, 'numClusters': k}
 
 
-def recompute_clusters(dataset_key, num_clusters, n_neighbors, min_dist):
+def recompute_clusters(dataset_key, node_count, num_clusters, n_neighbors, min_dist):
     """Re-label a cached DR2 embedding for a new k.
 
-    Returns ``None`` when no cached embedding exists for these parameters, which
-    the caller surfaces as a 404 rather than a 500.
+    Returns ``(None, params)`` when no cached embedding exists for these
+    parameters, so the caller can fall back to a full pass rather than 500.
     """
+    n_neighbors, min_dist = resolve_umap_params(node_count, n_neighbors, min_dist)
+    params = {'nNeighbors': n_neighbors, 'minDist': min_dist, 'numClusters': num_clusters}
+
     DR2_d = load_cached_dr2(f'{dataset_key}_{n_neighbors}_{min_dist}')
     if DR2_d is None:
         print('No cached DR2 results for these parameters.')
-        return None
+        return None, params
 
     kmeans_start = timer()
-    id_clusters_w_kmeans(DR2_d, num_clusters)
+    params['numClusters'] = id_clusters_w_kmeans(DR2_d, num_clusters)
     kmeans_end = timer()
-    print(f'Recomputed clusters for k={num_clusters} in {kmeans_end - kmeans_start:.3f}s')
+    print(f"Recomputed clusters for k={params['numClusters']} "
+          f'in {kmeans_end - kmeans_start:.3f}s')
 
-    return DR2_d
+    return DR2_d, params

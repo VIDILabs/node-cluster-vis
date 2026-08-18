@@ -199,7 +199,7 @@ def cluster_averages():
     bin_seconds = _int_param('binSeconds', 60)
     max_points = _int_param('maxPoints', 60)
 
-    assignments = store._cluster_assignments
+    assignments = store.cluster_assignments
     if assignments is None or assignments.empty:
         return jsonify({})
 
@@ -227,11 +227,134 @@ def cluster_averages():
     return jsonify(result)
 
 
+# --- data coverage ---------------------------------------------------------
+
+@app.route('/api/coverage', methods=['GET'])
+def coverage():
+    """Per-cluster reporting coverage and blank readings over the time range.
+
+    Query: optional ``nodes`` (restrict to a selection), ``bins``, ``metrics``.
+
+    Two things per cluster and bucket. ``active`` is how many of its nodes
+    reported at all — a node that stops reporting simply has no rows, so absence
+    cannot be read off the metric values. ``blank``/``readings`` is how many of
+    the readings it should have produced were null, NaN, or exactly 0.0, which
+    is what a NaN looks like once the upstream export has filled it in.
+    """
+    dataset = store.dataset
+    nodes = _csv_param('nodes')
+    assignments = store.cluster_assignments
+
+    # Which metrics decide whether a row carries a reading. Defaults to all of
+    # them; the UI passes the metrics it is currently showing.
+    scoped = [m for m in _csv_param('metrics') if m in dataset.metrics]
+    if not scoped:
+        scoped = list(dataset.metrics)
+
+    frame = dataset.frame[[NODE, TIME] + scoped]
+    if nodes:
+        frame = frame[frame[NODE].isin(nodes)]
+    if frame.empty or pd.isna(dataset.start) or pd.isna(dataset.end):
+        return jsonify({
+            'times': [], 'binSeconds': 0, 'clusters': [],
+            'nodeCount': 0, 'metrics': scoped,
+        })
+
+    # Blankness is counted per *reading* — one (node, metric, timestamp) cell —
+    # not per row. Requiring a node's whole row to be blank meant it had to be
+    # zero across every selected metric simultaneously, which essentially never
+    # happens: in the bundled sample no row is all-zero, yet `mem_free`,
+    # `bytes_out` and `proc_run` each have a timestamp where every node reads 0,
+    # and `cpu_wio` has three where more than half do. Those are the drops that
+    # are plainly visible in the line charts, and the row rule found none of them.
+    #
+    # NaN counts as blank too, and stays in the denominator: it is a reading
+    # that was expected and did not arrive.
+    values = frame[scoped]
+    blank_cells = values.isna() | (values == 0)
+    blanks_per_row = blank_cells.sum(axis=1).to_numpy()
+    # A node is "reporting" in a bucket when at least one of its readings there
+    # is a real value. A wholly blank row does not count as presence.
+    row_reports = blanks_per_row < len(scoped)
+
+    bins = max(_int_param('bins', config.COVERAGE_BINS), 1)
+    span = (dataset.end - dataset.start).total_seconds()
+    bin_seconds = max(int(np.ceil(span / bins)), 1) if span > 0 else 1
+
+    edges = pd.date_range(
+        start=dataset.start.floor(f'{bin_seconds}s'), end=dataset.end, freq=f'{bin_seconds}s'
+    )
+    if len(edges) == 0:
+        edges = pd.DatetimeIndex([dataset.start])
+
+    slot = pd.Index(edges).get_indexer(frame[TIME].dt.floor(f'{bin_seconds}s'))
+
+    work = pd.DataFrame({
+        NODE: frame[NODE].to_numpy(),
+        'slot': slot,
+        'blank': blanks_per_row,
+        'readings': len(scoped),
+        'reports': row_reports,
+    })
+    work = work[work['slot'] >= 0]
+    present = work.loc[work['reports'], [NODE, 'slot']].drop_duplicates()
+
+    if assignments is not None and not assignments.empty:
+        work = work.merge(assignments, on=NODE, how='left')
+        present = present.merge(assignments, on=NODE, how='left')
+        # Sized from every node in scope, not only the reporting ones, so a
+        # cluster that is entirely blank still gets a row instead of vanishing.
+        membership = assignments[assignments[NODE].isin(work[NODE].unique())]
+        sizes = membership.groupby('Cluster')[NODE].nunique()
+    else:
+        work['Cluster'] = 0
+        present['Cluster'] = 0
+        sizes = pd.Series({0: int(work[NODE].nunique())})
+
+    work = work.dropna(subset=['Cluster'])
+    present = present.dropna(subset=['Cluster'])
+
+    counts = present.groupby(['Cluster', 'slot']).size()
+    blanks = work.groupby(['Cluster', 'slot'])[['blank', 'readings']].sum()
+
+    clusters_out = []
+    for cluster, size in sizes.items():
+        active = np.zeros(len(edges), dtype=int)
+        if cluster in counts.index.get_level_values(0):
+            chunk = counts.loc[cluster]
+            active[chunk.index.to_numpy()] = chunk.to_numpy()
+
+        blank = np.zeros(len(edges), dtype=int)
+        readings = np.zeros(len(edges), dtype=int)
+        if cluster in blanks.index.get_level_values(0):
+            chunk = blanks.loc[cluster]
+            blank[chunk.index.to_numpy()] = chunk['blank'].to_numpy()
+            readings[chunk.index.to_numpy()] = chunk['readings'].to_numpy()
+
+        clusters_out.append({
+            'cluster': int(cluster),
+            'nodeCount': int(size),
+            'active': active.tolist(),
+            # Per-cluster gap row: blank readings out of the readings the
+            # cluster should have produced in that bucket.
+            'blank': blank.tolist(),
+            'readings': readings.tolist(),
+        })
+
+    return jsonify({
+        'times': edges.strftime('%Y-%m-%dT%H:%M:%S').tolist(),
+        'binSeconds': bin_seconds,
+        'clusters': sorted(clusters_out, key=lambda c: c['cluster']),
+        'nodeCount': int(present[NODE].nunique()),
+        'metrics': scoped,
+    })
+
+
 # --- dimensionality reduction ---------------------------------------------
 
 def _dr_payload(n_neighbors, min_dist, num_clusters, force_recompute):
     dataset = store.dataset
-    df = pipeline.get_dr_time(
+    df, used = pipeline.get_dr_time(
         dataset.frame, dataset.key(), n_neighbors, min_dist, num_clusters,
         force_recompute=force_recompute,
     )
@@ -245,32 +368,39 @@ def _dr_payload(n_neighbors, min_dist, num_clusters, force_recompute):
         'dr_features': _records(df.reset_index(drop=True)),
         'node_cluster_map': _records(df[[NODE, 'Cluster']].reset_index(drop=True)),
         'feat_contributions': contributions,
+        # What the auto-tuner actually settled on, so the controls can show it.
+        'params': used,
     }
+
+
+# 0 (or absent) means "choose from the data"; see params.py.
+def _requested_params():
+    return (
+        _int_param('n_neighbors', 0),
+        _float_param('min_dist', -1.0),
+        _int_param('num_clusters', 0),
+    )
 
 
 @app.route('/api/dr', methods=['GET'])
 def dr():
     """Two-step DR embedding, cluster labels, and ccPCA feature contributions."""
-    return jsonify(_dr_payload(
-        _int_param('n_neighbors', config.DEFAULT_N_NEIGHBORS),
-        _float_param('min_dist', config.DEFAULT_MIN_DIST),
-        _int_param('num_clusters', config.DEFAULT_NUM_CLUSTERS),
-        _bool_param('force', False),
-    ))
+    n_neighbors, min_dist, num_clusters = _requested_params()
+    return jsonify(_dr_payload(n_neighbors, min_dist, num_clusters, _bool_param('force', False)))
 
 
 @app.route('/api/clusters', methods=['GET'])
 def clusters():
     """Re-label the cached embedding for a new k without re-running DR."""
-    n_neighbors = _int_param('n_neighbors', config.DEFAULT_N_NEIGHBORS)
-    min_dist = _float_param('min_dist', config.DEFAULT_MIN_DIST)
-    num_clusters = _int_param('num_clusters', config.DEFAULT_NUM_CLUSTERS)
+    n_neighbors, min_dist, num_clusters = _requested_params()
 
     if _bool_param('force', False):
         return jsonify(_dr_payload(n_neighbors, min_dist, num_clusters, True))
 
     dataset = store.dataset
-    df = pipeline.recompute_clusters(dataset.key(), num_clusters, n_neighbors, min_dist)
+    df, used = pipeline.recompute_clusters(
+        dataset.key(), len(dataset.nodes), num_clusters, n_neighbors, min_dist
+    )
     if df is None:
         # Nothing cached for these parameters yet, so fall back to a full pass
         # instead of failing the request.
@@ -281,6 +411,7 @@ def clusters():
         'dr_features': _records(df.reset_index(drop=True)),
         'node_cluster_map': _records(df[[NODE, 'Cluster']].reset_index(drop=True)),
         'feat_contributions': pipeline.get_feat_contributions(df),
+        'params': used,
     })
 
 
@@ -360,9 +491,10 @@ def stream_next():
     store.append(pd.read_csv(path))
     dataset = store.dataset
 
-    n_neighbors = int(payload.get('n_neighbors', config.DEFAULT_N_NEIGHBORS))
-    min_dist = float(payload.get('min_dist', config.DEFAULT_MIN_DIST))
-    num_clusters = int(payload.get('num_clusters', config.DEFAULT_NUM_CLUSTERS))
+    # Same auto sentinels as the GET routes: 0/-1 means "derive from the data".
+    n_neighbors = int(payload.get('n_neighbors') or 0)
+    min_dist = float(payload.get('min_dist', -1.0))
+    num_clusters = int(payload.get('num_clusters') or 0)
 
     dr_results = _dr_payload(n_neighbors, min_dist, num_clusters, False)
 

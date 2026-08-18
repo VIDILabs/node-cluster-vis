@@ -52,6 +52,12 @@ class DatasetStore:
         with self._lock:
             return self._stream_index
 
+    @property
+    def cluster_assignments(self):
+        """Latest nodeId -> Cluster frame, or None before the first DR pass."""
+        with self._lock:
+            return self._cluster_assignments
+
     def is_loaded(self):
         with self._lock:
             return self._dataset is not None

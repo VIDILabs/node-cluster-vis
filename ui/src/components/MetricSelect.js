@@ -78,7 +78,7 @@ function Sparkline({ points, color }) {
   );
 }
 
-function MetricSelect({ selectedDims, headerMap, metrics, fcs, avgSeriesData, onMetricSelectChange }) {
+function MetricSelect({ selectedDims, headerMap, metrics, fcs, avgSeriesData, onMetricSelectChange, hiddenClusters }) {
   const [searchTerm, setSearchTerm] = useState("");
 
   // Drive the list from the metrics the dataset actually has, rather than from
@@ -95,10 +95,18 @@ function MetricSelect({ selectedDims, headerMap, metrics, fcs, avgSeriesData, on
       .sort((a, b) => maxAbsContribution(fcs, b) - maxAbsContribution(fcs, a));
   }, [features, fcs, searchTerm]);
 
-  const clusterOrder = fcs?.order_col ?? [];
+  // The contribution bars and the sparklines are read as one stack per row, so
+  // both drop a hidden cluster or they stop lining up with each other — and
+  // with the rest of the dashboard.
+  const clusterOf = (columnIndex) => fcs?.clusters?.[columnIndex] ?? columnIndex;
+  const clusterOrder = (fcs?.order_col ?? []).filter(
+    (columnIndex) => !hiddenClusters?.has(clusterOf(columnIndex))
+  );
+  const visibleBars = (metric) => contributionsFor(fcs, metric)
+    .filter((bar) => !hiddenClusters?.has(bar.cluster));
 
   return (
-    <div>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <Input
         placeholder="Search features..."
         value={searchTerm}
@@ -107,7 +115,15 @@ function MetricSelect({ selectedDims, headerMap, metrics, fcs, avgSeriesData, on
         style={{ marginBottom: 8 }}
       />
       <List
-        style={{ width: "100%", maxWidth: 300, overflowY: "auto", height: "calc(60vh - 50px)" }}
+        style={{
+          width: "100%",
+          maxWidth: 300,
+          overflowY: "auto",
+          flex: "1 1 auto",
+          minHeight: 0,
+          // Same floor as MetricView's scroller: never taller than the viewport.
+          maxHeight: "calc(100vh - 230px)",
+        }}
         bordered
         dataSource={filteredFeatures}
         renderItem={(key) => {
@@ -156,7 +172,7 @@ function MetricSelect({ selectedDims, headerMap, metrics, fcs, avgSeriesData, on
                   <FeatureContributionBarGraph
                     graphId={`${key.replace(/\W/g, "_")}-feat-graph`}
                     feature={key}
-                    fcData={contributionsFor(fcs, key)}
+                    fcData={visibleBars(key)}
                   />
                   <div style={{ display: "flex", flexDirection: "column", marginLeft: "5px", gap: "4px" }}>
                     {clusterOrder.map((columnIndex) => {
@@ -188,4 +204,5 @@ export default React.memo(MetricSelect, (prev, next) => (
   && prev.metrics === next.metrics
   && prev.headerMap === next.headerMap
   && prev.avgSeriesData === next.avgSeriesData
+  && prev.hiddenClusters === next.hiddenClusters
 ));

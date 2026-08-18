@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 
 import config
+import params
 
 READABLE_SUFFIXES = ('.csv', '.parquet', '.pq')
 
@@ -58,36 +59,57 @@ class Dataset:
         digest.update(str(self.end).encode('utf-8'))
         return digest.hexdigest()[:16]
 
-    def suggested_config(self):
-        """Sensible starting selections so a new dataset renders without hand-tuning.
+    def rank_metrics(self):
+        """Metrics ordered by how much they move over time, most first.
 
-        Picks the metrics that vary the most across nodes (the ones a clustering
-        view is actually informative about) and a baseline window over the first
-        fifth of the time range.
+        Scored on the *within-node* coefficient of variation weighted by how
+        often the metric actually reports a value. Ranking on the pooled spread
+        instead looks equivalent but promotes metrics that are flat-zero on half
+        the nodes and flat-high on the rest: a huge variance that draws as two
+        horizontal lines and tells a time-series view nothing.
         """
-        variances = {}
+        node_ids = self.frame[config.NODE_COLUMN]
+        scores = {}
         for metric in self.metrics:
             series = pd.to_numeric(self.frame[metric], errors='coerce')
-            spread = float(series.std(skipna=True) or 0.0)
-            scale = float(abs(series.mean(skipna=True)) or 0.0) + 1e-9
-            variances[metric] = spread / scale
-        ranked = sorted(self.metrics, key=lambda m: variances.get(m, 0.0), reverse=True)
-        selected_dims = ranked[:config.DEFAULT_MAX_METRICS]
+            if float(series.std(skipna=True) or 0.0) <= 0:
+                scores[metric] = 0.0
+                continue
+            by_node = series.groupby(node_ids)
+            temporal = (by_node.std() / (by_node.mean().abs() + 1e-9)).median(skipna=True)
+            scores[metric] = float(temporal or 0.0) * float((series != 0).mean())
+        return sorted(self.metrics, key=lambda m: scores.get(m, 0.0), reverse=True)
 
-        selected_points = self.nodes[:config.DEFAULT_MAX_NODES]
+    def suggested_config(self):
+        """Starting selections so a new dataset renders without hand-tuning.
 
-        b_start, b_end = self.start, self.end
-        if pd.notna(b_start) and pd.notna(b_end) and b_end > b_start:
-            b_end = b_start + (b_end - b_start) / 5
+        Everything is selected by default and the charts open on the full time
+        range; the caps only bite on datasets wide enough that showing all of it
+        would be unusable. UMAP parameters are derived from the node count, and
+        ``numClusters: 0`` asks the server to choose k by silhouette on the
+        embedding — see :mod:`params`.
+        """
+        ranked = self.rank_metrics()
+        selected_dims = (
+            ranked[:config.DEFAULT_MAX_METRICS] if config.DEFAULT_MAX_METRICS > 0 else ranked
+        )
+        selected_points = (
+            self.nodes[:config.DEFAULT_MAX_NODES] if config.DEFAULT_MAX_NODES > 0 else self.nodes
+        )
+
+        neighbors, min_dist = params.suggest_umap_params(len(self.nodes))
 
         return {
             'selectedDims': selected_dims,
             'selectedPoints': selected_points,
-            'bStart': _iso(b_start),
-            'bEnd': _iso(b_end),
-            'nNeighbors': config.DEFAULT_N_NEIGHBORS,
-            'minDist': config.DEFAULT_MIN_DIST,
-            'numClusters': config.DEFAULT_NUM_CLUSTERS,
+            # The line charts open on the whole series. Anchoring them to a
+            # fraction of the range instead left most metrics looking empty:
+            # the charts were showing the first fifth of the data and nothing else.
+            'bStart': _iso(self.start),
+            'bEnd': _iso(self.end),
+            'nNeighbors': neighbors,
+            'minDist': min_dist,
+            'numClusters': 0 if config.AUTO_PARAMS else config.DEFAULT_NUM_CLUSTERS,
         }
 
     def describe(self):

@@ -1,8 +1,8 @@
 import { Card, Col, Layout, Row, Select, Typography, Switch, Alert, Spin, Input, Button, Space } from "antd";
-import { useMemo, useRef, useCallback, useEffect, useState } from 'react';
+import { useRef, useCallback, useEffect, useMemo, useState } from 'react';
 import './App.css';
 import api from './api.js';
-import { FALLBACK_DEFAULTS, STREAM_INTERVAL_MS } from './config.js';
+import { COVERAGE_BINS, DEFAULT_WINDOW_MINUTES, FALLBACK_DEFAULTS, STREAM_INTERVAL_MS } from './config.js';
 import DRView from './components/DRPlot.js';
 import MetricSelect from "./components/MetricSelect.js";
 import MetricView from './components/MetricView.js';
@@ -10,6 +10,21 @@ import HeatmapView from './components/HeatmapView.js';
 import TimelineView from './components/TimelineView.js';
 
 const { Header, Content } = Layout;
+
+// Header readout of the range the dataset covers. The date is dropped from the
+// end when both fall on the same day, which is the usual shape of one export.
+function formatExtent([start, end]) {
+  const from = new Date(start);
+  const to = new Date(end);
+  if (Number.isNaN(+from) || Number.isNaN(+to)) return null;
+
+  const day = (d) => d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: '2-digit' });
+  const clock = (d) => d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false });
+
+  return from.toDateString() === to.toDateString()
+    ? `${day(from)} ${clock(from)} – ${clock(to)}`
+    : `${day(from)} ${clock(from)} – ${day(to)} ${clock(to)}`;
+}
 const { Option } = Select;
 const { Text } = Typography;
 
@@ -35,8 +50,8 @@ function App() {
 
   const [FCs, setFCs] = useState(null);
   const [DRTData, setDRTData] = useState(null);
-  const [seriesRows, setSeriesRows] = useState(null);
   const [allMetrics, setAllMetrics] = useState([]);
+  const [hiddenClusters, setHiddenClusters] = useState(() => new Set());
   const [dataExtent, setDataExtent] = useState([null, null]);
   const [metricData, setMetricData] = useState(null);
   const [avgSeriesData, setAvgSeriesData] = useState({});
@@ -44,10 +59,11 @@ function App() {
   const [baselines, setBaselines] = useState(null);
   const [headerMap, setHeaderMap] = useState({});
   const [nodeClusterMap, setNodeClusterMap] = useState(new Map());
+  const [coverage, setCoverage] = useState(null);
+  const [allNodes, setAllNodes] = useState([]);
   const [error, setError] = useState(null);
 
   const baselinesRef = useRef({});
-  const defaultsRef = useRef(FALLBACK_DEFAULTS);
 
   const [streamingMode, setStreamingMode] = useState(false);
   const [streamStatus, setStreamStatus] = useState(null);
@@ -58,14 +74,14 @@ function App() {
   // --- derived views ------------------------------------------------------
 
   // Group the flat rows the API returns into one array per metric, which is the
-  // shape the line charts consume.
-  const buildMetricData = useCallback((rows, dims, nodes) => {
-    const nodeFilter = nodes && nodes.length ? new Set(nodes) : null;
+  // shape the line charts consume. Every node is kept: the charts draw the whole
+  // population and fade what isn't selected, so this no longer has to be redone
+  // each time the lasso moves.
+  const buildMetricData = useCallback((rows, dims) => {
     const grouped = {};
     dims.forEach((dim) => { grouped[dim] = []; });
 
     rows.forEach((row) => {
-      if (nodeFilter && !nodeFilter.has(row.nodeId)) return;
       const timestamp = new Date(row.timestamp);
       dims.forEach((dim) => {
         if (row[dim] === undefined) return;
@@ -75,51 +91,37 @@ function App() {
     return grouped;
   }, []);
 
-  const timelineData = useMemo(() => {
-    if (!seriesRows?.length || !nodeClusterMap.size) return [];
-
-    // Contiguous runs where every selected metric read zero, per cluster.
-    const byCluster = new Map();
-    seriesRows.forEach((row) => {
-      const cluster = nodeClusterMap.get(row.nodeId);
-      if (cluster == null) return;
-      if (!byCluster.has(cluster)) byCluster.set(cluster, []);
-      byCluster.get(cluster).push(row);
-    });
-
-    const segments = [];
-    byCluster.forEach((rows, cluster) => {
-      rows.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-      let start = null;
-      let previous = null;
-
-      rows.forEach((row) => {
-        if (row.downtime === 1) {
-          const stamp = new Date(row.timestamp);
-          if (!start) start = stamp;
-          previous = stamp;
-        } else if (start) {
-          segments.push({ cluster, start, end: previous || start });
-          start = null;
-          previous = null;
-        }
-      });
-
-      if (start) {
-        segments.push({ cluster, start, end: previous || start });
-      }
-    });
-    return segments;
-  }, [seriesRows, nodeClusterMap]);
-
   // --- data loading -------------------------------------------------------
 
   const applyDrPayload = useCallback((payload) => {
     setDRTData(payload.dr_features);
     setFCs(payload.feat_contributions);
     setNodeClusterMap(new Map(payload.node_cluster_map.map((d) => [d.nodeId, d.Cluster])));
+    // The server picks n_neighbors and k from the data unless the user overrode
+    // them, so the controls have to be told what it settled on.
+    if (payload.params) {
+      setNNeighbors(payload.params.nNeighbors);
+      setMinDist(payload.params.minDist);
+      setNumClusters(payload.params.numClusters);
+    }
   }, []);
 
+  // Coverage is per-cluster but scoped to the current selection, so it answers
+  // "when did the nodes I just picked have data".
+  // `metrics` scopes the gap row: a row counts as a reading only if one of them
+  // is a real value, so the strip describes what the charts are showing.
+  const refreshCoverage = useCallback(async (nodes, metrics) => {
+    try {
+      setCoverage(await api.coverage(nodes, COVERAGE_BINS, metrics));
+    } catch (err) {
+      console.error('Could not load coverage', err);
+      setCoverage(null);
+    }
+  }, []);
+
+  // Always scored over every node. The heatmap shows the whole population and
+  // dims what isn't selected, so narrowing this to the lasso would blank out
+  // most of the panel and cost a round trip on every selection change.
   const fetchMrdmd = useCallback(async (nodes, dims) => {
     if (!dims.length || !nodes.length) {
       setzScores([]);
@@ -138,6 +140,10 @@ function App() {
     }, {});
   }, []);
 
+  // Fetched for *every* metric, not just the selected ones: the sparklines in
+  // the metric list are what you choose from, so a blank one for an unselected
+  // metric defeats the purpose. It only has to be refetched when the clustering
+  // changes, since that is what the averages are grouped by.
   const refreshClusterAverages = useCallback(async (dims) => {
     if (!dims.length) return setAvgSeriesData({});
     try {
@@ -151,7 +157,6 @@ function App() {
   // Load everything that depends on the active dataset.
   const initializeDataset = useCallback(async (description) => {
     const defaults = description.defaults || FALLBACK_DEFAULTS;
-    defaultsRef.current = defaults;
 
     setActiveDataset(description);
     setSelectedPoints(defaults.selectedPoints);
@@ -162,30 +167,27 @@ function App() {
     setMinDist(defaults.minDist);
     setNumClusters(defaults.numClusters);
     setDataExtent([description.start, description.end]);
+    setAllNodes(description.nodes || []);
 
     const [headers, seriesPayload, drPayload] = await Promise.all([
       api.metadata(),
       api.series(defaults.selectedDims),
-      api.dr({
-        nNeighbors: defaults.nNeighbors,
-        minDist: defaults.minDist,
-        numClusters: defaults.numClusters,
-      }),
+      // No parameters: the server derives n_neighbors, min_dist and k from the
+      // data and reports back what it used.
+      api.dr({}),
     ]);
 
     setHeaderMap(headers);
-    setSeriesRows(seriesPayload.data);
     setAllMetrics(seriesPayload.allMetrics);
-    setMetricData(buildMetricData(
-      seriesPayload.data, defaults.selectedDims, defaults.selectedPoints
-    ));
+    setMetricData(buildMetricData(seriesPayload.data, defaults.selectedDims));
     applyDrPayload(drPayload);
 
     await Promise.all([
-      fetchMrdmd(defaults.selectedPoints, defaults.selectedDims),
-      refreshClusterAverages(defaults.selectedDims),
+      fetchMrdmd(description.nodes || [], defaults.selectedDims),
+      refreshClusterAverages(seriesPayload.allMetrics),
+      refreshCoverage([], defaults.selectedDims),
     ]);
-  }, [applyDrPayload, buildMetricData, fetchMrdmd, refreshClusterAverages]);
+  }, [applyDrPayload, buildMetricData, fetchMrdmd, refreshClusterAverages, refreshCoverage]);
 
   const switchDataset = useCallback(async (source) => {
     setLoadingDataset(true);
@@ -230,35 +232,37 @@ function App() {
   // --- interactions -------------------------------------------------------
 
   const handleRecompute = useCallback(async (k, neighbors, dist, force, useDefaults) => {
-    const defaults = defaultsRef.current;
+    // "Reset defaults" sends nothing at all, which is how the server is asked to
+    // re-derive every parameter from the data. applyDrPayload then mirrors what
+    // it chose back into the controls.
     const params = useDefaults
-      ? {
-          numClusters: defaults.numClusters,
-          nNeighbors: defaults.nNeighbors,
-          minDist: defaults.minDist,
-        }
+      ? { numClusters: 0, nNeighbors: 0, minDist: -1 }
       : { numClusters: k, nNeighbors: neighbors, minDist: dist };
-
-    setNumClusters(params.numClusters);
-    setNNeighbors(params.nNeighbors);
-    setMinDist(params.minDist);
 
     try {
       // Changing k alone reuses the cached embedding; changing UMAP parameters
       // requires the full pass.
-      const changedEmbedding = params.nNeighbors !== nNeighbors || params.minDist !== minDist;
+      const changedEmbedding = useDefaults
+        || params.nNeighbors !== nNeighbors
+        || params.minDist !== minDist;
       const payload = changedEmbedding
         ? await api.dr({ ...params, force: true })
         : await api.clusters({ ...params, force });
 
       applyDrPayload(payload);
-      await refreshClusterAverages(selectedDims);
+      await Promise.all([
+        refreshClusterAverages(allMetrics),
+        refreshCoverage(selectedPoints, selectedDims),
+      ]);
       setError(null);
     } catch (err) {
       console.error(err);
       setError(`Could not recompute clusters: ${err.message}`);
     }
-  }, [applyDrPayload, minDist, nNeighbors, refreshClusterAverages, selectedDims]);
+  }, [
+    allMetrics, applyDrPayload, minDist, nNeighbors, refreshClusterAverages,
+    refreshCoverage, selectedDims, selectedPoints,
+  ]);
 
   const handleMetricSelectChange = useCallback(async (key) => {
     const isRemoving = selectedDims.includes(key);
@@ -266,6 +270,7 @@ function App() {
       ? selectedDims.filter((dim) => dim !== key)
       : [key, ...selectedDims];
 
+    // Ticking the box is local; it should not wait on the network.
     setSelectedDims(nextDims);
 
     if (isRemoving) {
@@ -275,50 +280,50 @@ function App() {
         return next;
       });
       setzScores((prev) => (prev || []).map(({ [key]: _removed, ...rest }) => rest));
-      refreshClusterAverages(nextDims);
+      await refreshCoverage(selectedPoints, nextDims);
       return;
     }
 
     try {
-      // Fetch only the newly selected metric, then merge it into what we hold.
-      const payload = await api.series([key], undefined);
-      setSeriesRows((prev) => mergeSeriesRows(prev, payload.data, key));
-      setMetricData((prev) => ({
-        ...prev,
-        ...buildMetricData(payload.data, [key], selectedPoints),
-      }));
+      // Both requests at once, and the state they feed applied in a single
+      // batch. Awaiting them in turn made the charts, the heatmap and the
+      // timeline each land on their own render, which is what read as several
+      // separate reloads.
+      const [payload, dmd] = await Promise.all([
+        api.series([key], undefined),
+        api.mrdmd({ nodes: allNodes, metrics: [key], recomputeBase: true }),
+      ]);
 
-      const dmd = await api.mrdmd({
-        nodes: selectedPoints, metrics: [key], recomputeBase: true,
-      });
-      setzScores((prev) => mergeZScores(prev || [], dmd.zscores, key));
-      setBaselines((prev) => [...dmd.baselines, ...(prev || [])]);
       dmd.baselines.forEach((baseline) => {
         baselinesRef.current[baseline.feature] = {
           baselineX: [new Date(baseline.b_start), new Date(baseline.b_end)],
           baselineY: [baseline.v_min, baseline.v_max],
         };
       });
-      refreshClusterAverages(nextDims);
+
+      setMetricData((prev) => ({
+        ...prev,
+        ...buildMetricData(payload.data, [key]),
+      }));
+      setzScores((prev) => mergeZScores(prev || [], dmd.zscores, key));
+      setBaselines((prev) => [...dmd.baselines, ...(prev || [])]);
+
+      await refreshCoverage(selectedPoints, nextDims);
     } catch (err) {
       console.error(err);
       setError(`Could not load metric "${key}": ${err.message}`);
+      // Put the list back the way it was; the metric never arrived.
+      setSelectedDims(selectedDims);
     }
-  }, [buildMetricData, refreshClusterAverages, selectedDims, selectedPoints]);
+  }, [allNodes, buildMetricData, refreshCoverage, selectedDims, selectedPoints]);
 
-  const updateSelectedNodes = useCallback(async (selectedNodeIds) => {
+  // Selection changes nothing that has to be recomputed: the charts already hold
+  // every node and fade the ones outside the selection. Only the coverage strip
+  // is scoped to it, and that is a single cheap request.
+  const updateSelectedNodes = useCallback((selectedNodeIds) => {
     setSelectedPoints(selectedNodeIds);
-    if (!seriesRows) return;
-    setMetricData(buildMetricData(seriesRows, selectedDims, selectedNodeIds));
-
-    if (!selectedNodeIds.length) return;
-    try {
-      await fetchMrdmd(selectedNodeIds, selectedDims);
-    } catch (err) {
-      console.error(err);
-      setError(`Could not recompute deviations: ${err.message}`);
-    }
-  }, [buildMetricData, fetchMrdmd, selectedDims, seriesRows]);
+    refreshCoverage(selectedNodeIds, selectedDims);
+  }, [refreshCoverage, selectedDims]);
 
   // --- streaming ----------------------------------------------------------
 
@@ -337,8 +342,7 @@ function App() {
         });
         if (cancelled) return;
 
-        setSeriesRows(payload.data);
-        setMetricData(buildMetricData(payload.data, selectedDims, selectedPoints));
+        setMetricData(buildMetricData(payload.data, selectedDims));
         applyDrPayload(payload.dr_results);
         if (payload.mrdmd_results?.zscores?.length) {
           setzScores(payload.mrdmd_results.zscores);
@@ -367,6 +371,51 @@ function App() {
   ]);
 
   // --- render -------------------------------------------------------------
+
+  // The window the charts and the timeline brush open on: the tail of the data,
+  // or the whole of it when that is shorter. Distinct from bStart/bEnd, which
+  // are the mrDMD baseline window and answer a different question.
+  //
+  // Also memoized because every LineChart's draw effect depends on it — built
+  // inline in the JSX it was a new array on every render, so any state change
+  // anywhere in the app redrew every chart on screen.
+  const timeRange = useMemo(() => {
+    const start = new Date(dataExtent[0]);
+    const end = new Date(dataExtent[1]);
+    if (Number.isNaN(+start) || Number.isNaN(+end)) {
+      return [new Date(bStart), new Date(bEnd)];
+    }
+    const windowStart = new Date(+end - DEFAULT_WINDOW_MINUTES * 60000);
+    return [windowStart > start ? windowStart : start, end];
+  }, [dataExtent, bStart, bEnd]);
+
+  const extentLabel = useMemo(() => formatExtent(dataExtent), [dataExtent]);
+
+  // Cluster visibility is owned here and set in exactly one place — the button
+  // row under the Node Similarity controls. Every view reads it: the embedding
+  // drops those points, the heatmap those columns, the charts those polylines,
+  // the timeline those rows, the metric list those bars and sparklines.
+  const clusters = useMemo(() => {
+    const seen = new Set();
+    nodeClusterMap.forEach((cluster) => {
+      if (Number.isFinite(cluster)) seen.add(cluster);
+    });
+    return Array.from(seen).sort((a, b) => a - b);
+  }, [nodeClusterMap]);
+
+  // Re-running k renumbers the clusters, so a stale hidden set would leave
+  // nodes invisible with no button switched off to explain it.
+  const clusterKey = clusters.join(',');
+  useEffect(() => { setHiddenClusters(new Set()); }, [clusterKey]);
+
+  const toggleCluster = useCallback((cluster) => {
+    setHiddenClusters((prev) => {
+      const next = new Set(prev);
+      if (next.has(cluster)) next.delete(cluster);
+      else next.add(cluster);
+      return next;
+    });
+  }, []);
 
   const hasSeries = Boolean(metricData && baselines && zScores && Object.keys(headerMap).length);
   const hasDr = Boolean(DRTData && FCs);
@@ -429,11 +478,18 @@ function App() {
                 />
               </Col>
               <Col>
-                <Text strong italic style={{ fontSize: "16px" }}>Nodes: {totalNodes}</Text>
+                <Text strong italic style={{ fontSize: "16px" }}>
+                  Nodes: {totalNodes}
+                </Text>
               </Col>
               <Col>
                 <Text strong italic style={{ fontSize: "16px" }}>Metrics: {totalMeasures}</Text>
               </Col>
+              {extentLabel && (
+                <Col>
+                  <Text strong italic style={{ fontSize: "16px" }}>{extentLabel}</Text>
+                </Col>
+              )}
             </Row>
           </Col>
         </Row>
@@ -453,24 +509,24 @@ function App() {
       <Content style={{ marginTop: "5px" }}>
         <Spin spinning={loadingDataset} tip="Loading dataset…">
           <Row gutter={[8, 8]}>
-            <Col span={14}>
-              {hasDr && seriesRows ? (
+            <Col span={14} className="dashboard-column">
+              {hasDr && coverage?.clusters?.length ? (
                 <TimelineView
-                  bStart={bStart}
-                  bEnd={bEnd}
-                  data={timelineData}
+                  windowStart={timeRange[0]}
+                  windowEnd={timeRange[1]}
+                  coverage={coverage}
                   nodeDataStart={dataExtent[0]}
                   nodeDataEnd={dataExtent[1]}
-                  nodeClusterMap={nodeClusterMap}
+                  hiddenClusters={hiddenClusters}
                 />
               ) : (
                 <Placeholder height="30vh" message="No timeline data yet" />
               )}
 
               {hasSeries ? (
-                <Card title="METRIC READING VIEW" size="small" style={{ height: "auto" }}>
+                <Card title="METRIC READING VIEW" size="small" className="panel-fill">
                   <Row gutter={[16, 16]}>
-                    <Col span={8}>
+                    <Col span={8} style={{ height: "100%", minHeight: 0 }}>
                       <MetricSelect
                         selectedDims={selectedDims}
                         headerMap={headerMap}
@@ -478,12 +534,13 @@ function App() {
                         fcs={FCs}
                         avgSeriesData={avgSeriesData}
                         onMetricSelectChange={handleMetricSelectChange}
+                        hiddenClusters={hiddenClusters}
                       />
                     </Col>
-                    <Col span={16}>
+                    <Col span={16} style={{ height: "100%", minHeight: 0 }}>
                       <MetricView
                         data={metricData}
-                        timeRange={[new Date(bStart), new Date(bEnd)]}
+                        timeRange={timeRange}
                         selectedDims={selectedDims}
                         selectedPoints={selectedPoints}
                         fcs={FCs}
@@ -495,6 +552,7 @@ function App() {
                         setBaselines={setBaselines}
                         nodeClusterMap={nodeClusterMap}
                         headerMap={headerMap}
+                        hiddenClusters={hiddenClusters}
                       />
                     </Col>
                   </Row>
@@ -504,7 +562,7 @@ function App() {
               )}
             </Col>
 
-            <Col span={10}>
+            <Col span={10} className="dashboard-column">
               {hasDr ? (
                 <DRView
                   data={DRTData}
@@ -520,13 +578,21 @@ function App() {
                   setMinDist={setMinDist}
                   numClusters={numClusters}
                   setNumClusters={setNumClusters}
+                  clusters={clusters}
+                  hiddenClusters={hiddenClusters}
+                  onToggleCluster={toggleCluster}
                 />
               ) : (
                 <Placeholder height="40vh" message="No embedding yet" />
               )}
 
               {zScores?.length ? (
-                <HeatmapView data={zScores} nodeClusterMap={nodeClusterMap} />
+                <HeatmapView
+                  data={zScores}
+                  nodeClusterMap={nodeClusterMap}
+                  selectedPoints={selectedPoints}
+                  hiddenClusters={hiddenClusters}
+                />
               ) : (
                 <Placeholder height="50vh" message="No deviation scores yet" />
               )}
@@ -536,17 +602,6 @@ function App() {
       </Content>
     </Layout>
   );
-}
-
-// Merge a newly fetched metric column into the rows we already hold, keyed on
-// (node, timestamp) so the timeline stays aligned.
-function mergeSeriesRows(previous, incoming, key) {
-  if (!previous) return incoming;
-  const lookup = new Map(incoming.map((row) => [`${row.nodeId}|${row.timestamp}`, row[key]]));
-  return previous.map((row) => {
-    const value = lookup.get(`${row.nodeId}|${row.timestamp}`);
-    return value === undefined ? row : { ...row, [key]: value };
-  });
 }
 
 function mergeZScores(oldZScores, newZScores, newFeature) {

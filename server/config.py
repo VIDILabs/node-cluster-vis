@@ -74,19 +74,40 @@ DROP_COLUMNS = _env_list('NCV_DROP_COLUMNS', 'cname_id')
 DERIVED_COLUMNS = _env_list('NCV_DERIVED_COLUMNS', 'downtime')
 
 # --- Analysis defaults -----------------------------------------------------
+# These are only the floor the auto-tuner falls back to. With AUTO_PARAMS on
+# (the default) the UMAP neighbourhood and k are derived from the data itself —
+# see pipeline.suggest_umap_params / pipeline.suggest_k — because a fixed
+# n_neighbors=15 is meaningless on a 30-node dataset and far too tight on 5000.
+AUTO_PARAMS = _env_bool('NCV_AUTO_PARAMS', True)
 DEFAULT_N_NEIGHBORS = _env_int('NCV_N_NEIGHBORS', 15)
 DEFAULT_MIN_DIST = _env_float('NCV_MIN_DIST', 0.1)
 DEFAULT_NUM_CLUSTERS = _env_int('NCV_NUM_CLUSTERS', 4)
-DEFAULT_MAX_METRICS = _env_int('NCV_MAX_METRICS', 5)
-DEFAULT_MAX_NODES = _env_int('NCV_MAX_NODES', 25)
+# Widest k the silhouette sweep will consider; also bounded by node count.
+MAX_AUTO_CLUSTERS = _env_int('NCV_MAX_AUTO_CLUSTERS', 10)
+# How much silhouette score the sweep will give up to pick a smaller k. 0 makes
+# it a plain arg-max, which over-splits on UMAP embeddings — see params.suggest_k.
+K_TOLERANCE = _env_float('NCV_K_TOLERANCE', 0.05)
+# 0 means "select every metric/node". Small deployments want the whole picture
+# up front; the caps exist for datasets wide enough that everything-on is unusable.
+DEFAULT_MAX_METRICS = _env_int('NCV_MAX_METRICS', 12)
+DEFAULT_MAX_NODES = _env_int('NCV_MAX_NODES', 0)
 DR1_METHOD = _env('NCV_DR1_METHOD', 'PCA')
 DR2_METHOD = _env('NCV_DR2_METHOD', 'UMAP')
 RANDOM_SEED = _env_int('NCV_RANDOM_SEED', 42)
+
+# Time buckets used by /api/coverage when the caller doesn't ask for a width.
+COVERAGE_BINS = _env_int('NCV_COVERAGE_BINS', 240)
 
 # --- mrDMD -----------------------------------------------------------------
 MRDMD_MAX_LEVELS = _env_int('NCV_MRDMD_MAX_LEVELS', 9)
 MRDMD_STEP = _env_int('NCV_MRDMD_STEP', 10000)
 MRDMD_MAX_WORKERS = _env_int('NCV_MRDMD_MAX_WORKERS', 15)
+# Share of nodes that must sit inside the IQR band for a timestamp to count as
+# part of the baseline window. 1.0 restores the old unanimity rule, which starves
+# heavy-tailed metrics of a usable window — see mrdmd.find_time_range.
+MRDMD_BASELINE_COVERAGE = _env_float('NCV_MRDMD_BASELINE_COVERAGE', 0.9)
+# Shortest baseline window mrDMD can decompose; below this we use the full range.
+MRDMD_MIN_BASELINE_COLUMNS = _env_int('NCV_MRDMD_MIN_BASELINE_COLUMNS', 16)
 
 # Number of points per series sent to the browser. Downsampling here is what
 # keeps the payload small for multi-hundred-thousand-row datasets.

@@ -2,8 +2,10 @@
 
 ## About
 
-- Implementation of two-step DR (PCA+UMAP) with contrastive clusters for feature contributions.
-- Interactive mrDMD to adjust metric baselines and compute per-node devation from baseline(s).
+This system combines visualization+analysis techniques to assess multivariate time series data from HPC monitoring systems (NovADAQ at FNAL and Theta at ANL). We implement:
+
+- *Intra-cluster* analysis: Two-step DR (PCA+UMAP) across time and metric domains with contrastive clusters for feature contributions.
+- *Inter-cluster* analysis: Interactive mrDMD to adjust metric baselines and compute per-node devation from baseline(s).
 
 ## Requirements
 

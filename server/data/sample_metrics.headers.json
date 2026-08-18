@@ -8,6 +8,17 @@
     "type": "float",
     "units": ""
   },
+  "bytes_in": {
+    "desc": "Number of bytes in per second",
+    "filename": "bytes_in.json",
+    "groups": [
+      "network"
+    ],
+    "slope": "both",
+    "title": "Bytes Received",
+    "type": "float",
+    "units": "bytes/sec"
+  },
   "bytes_out": {
     "desc": "Number of bytes out per second",
     "filename": "bytes_out.json",
@@ -18,28 +29,6 @@
     "title": "Bytes Sent",
     "type": "float",
     "units": "bytes/sec"
-  },
-  "cpu_nice": {
-    "desc": "Percentage of CPU utilization that occurred while executing at the user level with nice priority",
-    "filename": "cpu_nice.json",
-    "groups": [
-      "cpu"
-    ],
-    "slope": "both",
-    "title": "CPU Nice",
-    "type": "float",
-    "units": "%"
-  },
-  "cpu_num": {
-    "desc": "Total number of CPUs",
-    "filename": "cpu_num.json",
-    "groups": [
-      "cpu"
-    ],
-    "slope": "zero",
-    "title": "CPU Count",
-    "type": "uint16",
-    "units": "CPUs"
   },
   "cpu_user": {
     "desc": "Percentage of CPU utilization that occurred while executing at the user level",
@@ -73,6 +62,17 @@
     "title": "Free Memory",
     "type": "float",
     "units": "KB"
+  },
+  "pkts_out": {
+    "desc": "Packets out per second",
+    "filename": "pkts_out.json",
+    "groups": [
+      "network"
+    ],
+    "slope": "both",
+    "title": "Packets Sent",
+    "type": "float",
+    "units": "packets/sec"
   },
   "proc_run": {
     "desc": "Total number of running processes",
