@@ -333,6 +333,14 @@ Cross-view highlighting builds CSS selectors from node ids. Always go through
 `utils/nodes.js` (`nodeClass`/`lineClass`/`pointId`) — raw ids with dots, colons,
 or leading digits produce invalid selectors.
 
+`TimelineView`'s x domain runs to the **end of the last bucket**, not to the
+last timestamp. Each cell covers the bucket that starts at its timestamp, so a
+domain ending at the final timestamp laid that cell down entirely to the right
+of the axis. Cell widths are additionally clamped to the axis end, and the brush
+extent is flush with it so the last bucket can still be selected. The range is
+`[MARGIN.left, width - MARGIN.right]`; it previously subtracted the left gutter
+a second time and stopped 50px short of the panel.
+
 `TimelineView` draws two bands per cluster: a full-height coverage band and a
 deliberately thinner gap band directly under it, sharing one `c0` label. The gap
 band is a qualifier on the row above rather than a peer of it, so it carries less
@@ -364,6 +372,34 @@ Per-dataset defaults (nodes, metrics, baseline window, UMAP params) come from
 `/api/datasets` → `active.defaults`, derived server-side from metric variance.
 `ui/src/config.js` holds only UI behaviour with no server equivalent.
 
+**The baseline window is editable two ways.** `BaselineControls` puts four
+boxes beside every chart — Min, Max, Start, End — showing the window the server
+derived. Labels sit to the left in one narrow auto-sized column, and each box
+carries its own width in `ch` (12 for a bound, 19 for a timestamp) rather than a
+shared one. A "Baseline Controls" heading spans both columns at the top of each
+group, level with the chart title beside it. Both they and the brush rectangle write through `updateBaseline`, so a
+drag refills the boxes and a typed value moves the rectangle. Each commit is an
+mrDMD round trip for that metric, so edits land on blur or Enter, not per
+keystroke, and only when the value differs from what is in effect; a window
+whose range is inverted or unparseable reverts instead of being sent. The boxes
+are deliberately *not* tied to the Baseline Region switch — that hides the
+rectangle so the lines can be read, and the window is still in force.
+
+`MetricView` passes `baselines.find(...)` — the **entry**, not the array. That
+is what makes the boxes follow a drag at all: `LineChart` is memoized and
+`baselinesRef` is a ref, so mutating it re-renders nothing. `updateBaseline`
+rebuilds only the edited metric's entry, so the other charts keep their identity
+and don't redraw.
+
+**Timestamps on the wire are naive wall clock** (`utils/time.js`,
+`toNaiveISO`) — never `Date.toISOString()`. Datasets carry no zone and the
+frame's index is `datetime64[ns]`, so a `Z`-suffixed string parses to a tz-aware
+Timestamp that pandas will not compare against it: `TypeError: Invalid
+comparison between dtype=datetime64[ns] and Timestamp`, a 500 rather than a
+wrong answer. `server._naive_timestamp` strips an offset if one arrives anyway.
+The boxes and `d3.timeFormat` are both local, so wall clock is the currency end
+to end.
+
 **The view window and the baseline window are different things.** `bStart`/
 `bEnd` are the mrDMD baseline window and come from the server. `timeRange` — what
 the charts and the timeline brush open on — is derived on the client as the last
@@ -372,6 +408,12 @@ shorter. Conflating them is how the charts once opened on the first fifth of the
 range. Note the bundled sample samples every ~4m45s over 18h22m, so a 30-minute
 window holds only 7 of its 233 timestamps; the setting suits per-minute telemetry,
 not this extract.
+
+`MetricSelect`'s search box and list share one `LIST_WIDTH` (220px) on their
+common wrapper. The box previously filled the column while the list stopped at
+`maxWidth: 300`, which read as two unrelated controls stacked. The column is
+`span={6}` against the charts' `span={18}`; the width the charts get back pays
+for the baseline boxes.
 
 Cluster averages (the sparklines in the metric list) are fetched for **every**
 metric, not the selected ones — the list is what you choose from, so a blank
@@ -453,6 +495,11 @@ when the clustering changes, which also keeps them off the metric-toggle path.
   plot area is already clipped; pass every point and let the clip do the work.
 - The heatmap's y-axis was appended before its x-axis, so rotated node labels
   scrolled left *over* the metric names instead of disappearing behind them.
+- `TimelineView`'s x range subtracted `MARGIN.left` twice, and its cells were
+  drawn a full bucket wide from the domain's last timestamp — so the strip ran
+  past the right end of its own axis while leaving a gutter of dead space.
+- `updateBaseline` sent `Date.toISOString()`, so every manual baseline change —
+  every brush drag — reached `/api/mrdmd` as a tz-aware timestamp and 500'd.
 - Heatmap and DR hover handlers restored a fixed opacity on mouse-out, which
   permanently un-dimmed whatever had been hovered. They now read
   `data-rest-opacity` off each line.

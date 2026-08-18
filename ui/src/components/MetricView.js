@@ -5,6 +5,7 @@ import LineChart from './LineChart.js';
 import api from '../api.js';
 import { colorScale, COLORS } from '../utils/colors.js';
 import { CHART_FONT } from '../config.js';
+import { toNaiveISO } from '../utils/time.js';
 
 const MetricView = ({ data, timeRange, selectedDims, selectedPoints, zScores, setzScores, setBaselines, baselines, baselinesRef, nodeClusterMap, headerMap, hiddenClusters }) => {
     const chartsRef = useRef([]);
@@ -92,11 +93,14 @@ const MetricView = ({ data, timeRange, selectedDims, selectedPoints, zScores, se
       const [start, end] = newBaseline.baselineX;
       const [v_min, v_max] = newBaseline.baselineY;
 
-      // ISO strings round-trip through the API unambiguously; the previous
-      // hand-rolled "GMT" stringification depended on the browser's locale
-      // formatting and lost the zone on some engines.
-      const b_start = start.toISOString();
-      const b_end = end.toISOString();
+      // Naive wall clock, *not* toISOString(). The server's timestamps carry no
+      // zone and its frame index is naive, so a `Z`-suffixed string parses to a
+      // tz-aware Timestamp that pandas refuses to compare against it — every
+      // manual baseline change 500'd with "Invalid comparison between
+      // dtype=datetime64[ns] and Timestamp". This hands back the same wall
+      // clock the server sent.
+      const b_start = toNaiveISO(start);
+      const b_end = toNaiveISO(end);
 
       // updating baselines
       setBaselines(prevBaselines => {
@@ -137,6 +141,9 @@ const MetricView = ({ data, timeRange, selectedDims, selectedPoints, zScores, se
         })
         .catch(error => console.error('Could not update baseline:', error));
     }, [baselinesRef, selectedPoints, setBaselines, setzScores]);
+
+    // Newly loaded metrics are prepended, so the first match is the live one.
+    const baselineFor = (field) => baselines?.find(b => b.feature === field);
 
     if (!data || !baselines) return null;
 
@@ -181,6 +188,13 @@ const MetricView = ({ data, timeRange, selectedDims, selectedPoints, zScores, se
                     key={`chart-${field}`}
                     data={data[field]}
                     field={field} 
+                    // The entry, not the whole array: LineChart is memoized, and
+                    // `updateBaseline` rebuilds only the edited metric's entry,
+                    // so the other charts keep the identity they had and do not
+                    // redraw. Passing the array would redraw all of them on
+                    // every drag. It is also what makes the number boxes follow
+                    // a drag at all — a ref mutation alone re-renders nothing.
+                    baseline={baselineFor(field)}
                     baselinesRef={baselinesRef}
                     selectedTimeRange={selectedTimeRange}
                     updateBaseline={updateBaseline}

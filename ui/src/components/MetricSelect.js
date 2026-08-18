@@ -6,6 +6,11 @@ import { colorScale } from '../utils/colors.js';
 
 const SPARK_WIDTH = 60;
 const SPARK_HEIGHT = 20;
+// The search box and the list are one control, so one width governs both — the
+// box used to fill the column while the list stopped at 300, which read as two
+// unrelated things stacked. Narrow, because this is a list of names: the width
+// the charts get back is worth more than a wider ellipsis threshold.
+const LIST_WIDTH = 220;
 
 function smoothSeries(series, windowSize = 5, maxPoints = 40) {
   if (!series || series.length === 0) return [];
@@ -106,9 +111,12 @@ function MetricSelect({ selectedDims, headerMap, metrics, fcs, avgSeriesData, on
     .filter((bar) => !hiddenClusters?.has(bar.cluster));
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+    <div style={{
+      display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0,
+      width: '100%', maxWidth: `${LIST_WIDTH}px`,
+    }}>
       <Input
-        placeholder="Search features..."
+        placeholder="Search metrics..."
         value={searchTerm}
         onChange={(e) => setSearchTerm(e.target.value)}
         prefix={<SearchOutlined />}
@@ -117,7 +125,6 @@ function MetricSelect({ selectedDims, headerMap, metrics, fcs, avgSeriesData, on
       <List
         style={{
           width: "100%",
-          maxWidth: 300,
           overflowY: "auto",
           flex: "1 1 auto",
           minHeight: 0,

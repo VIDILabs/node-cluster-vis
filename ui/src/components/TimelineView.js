@@ -76,10 +76,24 @@ const TimelineView = ({ coverage, windowStart, windowEnd, nodeDataStart, nodeDat
                 .attr("viewBox", `0 0 ${width} ${height}`)
                 .attr("preserveAspectRatio", "xMidYMid meet");
 
+      // One cell covers the bucket that *starts* at its timestamp, so the strip
+      // is one bucket wider than the span of the timestamps themselves. Ending
+      // the domain at the last timestamp drew that final cell entirely to the
+      // right of the axis; the domain therefore runs to the end of the last
+      // bucket, and every cell lands inside the plot.
+      const binMs = (coverage?.binSeconds || 60) * 1000;
+      const lastTime = times.length ? +times[times.length - 1] : +new Date(nodeDataEnd);
+      const plotRight = width - MARGIN.right;
+
       const xScale = d3
         .scaleTime()
-        .domain([new Date(nodeDataStart), new Date(nodeDataEnd)])
-        .range([MARGIN.left, width - MARGIN.right - MARGIN.left]);
+        .domain([
+          new Date(nodeDataStart),
+          new Date(Math.max(+new Date(nodeDataEnd), lastTime + binMs)),
+        ])
+        // Was `width - MARGIN.right - MARGIN.left`, which subtracted the left
+        // gutter a second time and stopped the axis 50px short of the panel.
+        .range([MARGIN.left, plotRight]);
 
       // Laid out by hand rather than with a band scale: the two bands in a
       // group are deliberately different heights, which a band scale cannot do.
@@ -128,10 +142,12 @@ const TimelineView = ({ coverage, windowStart, windowEnd, nodeDataStart, nodeDat
       // One cell per (cluster, time bucket). Cell width comes from the bucket
       // spacing rather than a fixed number, so the strip stays gap-free at any
       // bin count the server hands back.
-      const binMs = (coverage?.binSeconds || 60) * 1000;
       const cellWidth = times.length > 1
         ? Math.max(xScale(times[1]) - xScale(times[0]), 1)
         : Math.max(xScale(new Date(+times[0] + binMs)) - xScale(times[0]), 1);
+
+      // Belt and braces against rounding: nothing is drawn past the axis end.
+      const cellFrom = (time) => Math.max(Math.min(cellWidth, plotRight - xScale(time)), 0);
 
       clusters.forEach((row) => {
         const { coverageY, gapY } = layout.get(row.cluster);
@@ -148,7 +164,7 @@ const TimelineView = ({ coverage, windowStart, windowEnd, nodeDataStart, nodeDat
           .attr("class", "coverage-cell")
           .attr("x", d => xScale(d.time))
           .attr("y", coverageY)
-          .attr("width", cellWidth)
+          .attr("width", d => cellFrom(d.time))
           .attr("height", COVERAGE_HEIGHT)
           .attr("fill", colorScale(row.cluster))
           // Opacity carries the share of the cluster that reported, so a partial
@@ -174,7 +190,7 @@ const TimelineView = ({ coverage, windowStart, windowEnd, nodeDataStart, nodeDat
           .attr("class", "gap-cell")
           .attr("x", d => xScale(d.time))
           .attr("y", gapY)
-          .attr("width", cellWidth)
+          .attr("width", d => cellFrom(d.time))
           .attr("height", GAP_HEIGHT)
           .attr("fill", GAP_COLOR)
           .attr("opacity", d => 0.15 + 0.85 * (d.blank / d.readings))
@@ -190,7 +206,8 @@ const TimelineView = ({ coverage, windowStart, windowEnd, nodeDataStart, nodeDat
       const brush = d3.brushX(xScale)
         .extent([
           [Math.max(MARGIN.left, earliestNodeDataTime), MARGIN.top],
-          [width - MARGIN.right - 20, height - MARGIN.bottom - 1]
+          // Flush with the axis end, so the last bucket can be brushed.
+          [plotRight, height - MARGIN.bottom - 1]
         ])
         .on('end', (event) => {
             // Only a brush the user dragged. `brush.move` emits 'end' too, and

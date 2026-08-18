@@ -52,6 +52,23 @@ def _int_param(name, default):
         return default
 
 
+def _naive_timestamp(value):
+    """Parse a timestamp and drop any zone, matching the frame's naive index.
+
+    Datasets carry wall-clock timestamps with no offset, so the index is
+    ``datetime64[ns]`` and tz-naive. A client that sends an offset -- a browser
+    calling ``Date.toISOString()`` is the obvious way -- yields a tz-aware
+    Timestamp, and comparing the two raises ``TypeError: Invalid comparison
+    between dtype=datetime64[ns] and Timestamp``: a 500 rather than a wrong
+    answer. An offset is converted to UTC and then dropped, so a caller that
+    insists on sending one still gets a defined result.
+    """
+    stamp = pd.to_datetime(value)
+    if stamp.tzinfo is not None:
+        stamp = stamp.tz_convert('UTC').tz_localize(None)
+    return stamp
+
+
 def _float_param(name, default):
     try:
         return float(request.args.get(name, default))
@@ -452,8 +469,8 @@ def mrdmd_route():
             metrics[0],
             _float_param('vMin', 0.0),
             _float_param('vMax', 0.0),
-            pd.to_datetime(b_start),
-            pd.to_datetime(b_end),
+            _naive_timestamp(b_start),
+            _naive_timestamp(b_end),
         )
     else:
         zscores, baselines = get_mrdmd(

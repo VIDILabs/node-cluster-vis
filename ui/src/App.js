@@ -526,7 +526,7 @@ function App() {
               {hasSeries ? (
                 <Card title="METRIC READING VIEW" size="small" className="panel-fill">
                   <Row gutter={[16, 16]}>
-                    <Col span={8} style={{ height: "100%", minHeight: 0 }}>
+                    <Col span={6} style={{ height: "100%", minHeight: 0 }}>
                       <MetricSelect
                         selectedDims={selectedDims}
                         headerMap={headerMap}
@@ -537,7 +537,7 @@ function App() {
                         hiddenClusters={hiddenClusters}
                       />
                     </Col>
-                    <Col span={16} style={{ height: "100%", minHeight: 0 }}>
+                    <Col span={18} style={{ height: "100%", minHeight: 0 }}>
                       <MetricView
                         data={metricData}
                         timeRange={timeRange}

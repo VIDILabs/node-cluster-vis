@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { colorScale } from '../utils/colors.js';
 import { lineClass } from '../utils/nodes.js';
 import { CHART_FONT, OPACITY } from '../config.js';
+import BaselineControls from './BaselineControls.js';
 
 // The chart draws at the container's real pixel width — no viewBox scaling — so
 // a 12px label is 12px on screen. Previously a fixed 800x300 viewBox was letter-
@@ -41,7 +42,7 @@ export function formatTick(value) {
     return `${mantissa.toFixed(1)}e${exponent}`;
 }
 
-const LineChart = ({ data, field, baselinesRef, selectedTimeRange, updateBaseline, nodeClusterMap, metadata, registerChart, showBaselines, selectedPoints, hiddenClusters }) => {
+const LineChart = ({ data, field, baseline, baselinesRef, selectedTimeRange, updateBaseline, nodeClusterMap, metadata, registerChart, showBaselines, selectedPoints, hiddenClusters }) => {
     const svgContainerRef = useRef();
 
     const xScaleRef = useRef();
@@ -321,8 +322,24 @@ const LineChart = ({ data, field, baselinesRef, selectedTimeRange, updateBaselin
     useEffect(() => { applyBaselineVisibility(); }, [applyBaselineVisibility]);
   
     return (
-      <div>
-        <div ref={svgContainerRef} style={{ width: '100%', height: `${HEIGHT}px` }}></div>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px' }}>
+        {/* minWidth:0 is what lets the chart shrink beside the fields. A flex
+            item defaults to min-width:auto, so without it the row overflows
+            instead of the plot narrowing, and the ResizeObserver never sees a
+            width the panel can actually hold. */}
+        <div
+          ref={svgContainerRef}
+          style={{ flex: '1 1 auto', minWidth: 0, height: `${HEIGHT}px` }}
+        ></div>
+        {/* Deliberately not tied to `showBaselines`: that switch hides the
+            rectangle so the lines can be read, and the window it describes is
+            still in force — the heatmap's z-scores move when these change,
+            which is feedback enough. */}
+        <BaselineControls
+          field={field}
+          baseline={baseline}
+          onCommit={updateBaseline}
+        />
     </div>
   );
 

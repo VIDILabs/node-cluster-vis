@@ -93,3 +93,46 @@ describe('TimelineView cluster visibility', () => {
     expect(one.querySelectorAll('g[class^="gap-c"]')).toHaveLength(1);
   });
 });
+
+describe('TimelineView right edge', () => {
+  const PANEL_WIDTH = 600;
+  const MARGIN_RIGHT = 10;
+
+  beforeEach(() => {
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', {
+      configurable: true,
+      get() { return PANEL_WIDTH; },
+    });
+  });
+  afterEach(() => { delete HTMLElement.prototype.clientWidth; });
+
+  test('no cell is drawn past the end of the axis', () => {
+    const { container } = draw();
+    const plotRight = PANEL_WIDTH - MARGIN_RIGHT;
+
+    const cells = Array.from(container.querySelectorAll('rect.coverage-cell, rect.gap-cell'));
+    expect(cells.length).toBeGreaterThan(10);
+
+    const rightEdges = cells.map(
+      c => Number(c.getAttribute('x')) + Number(c.getAttribute('width'))
+    );
+    // A cell covers the bucket starting at its timestamp, so the last one used
+    // to be laid down entirely to the right of the axis.
+    expect(Math.max(...rightEdges)).toBeLessThanOrEqual(plotRight + 0.5);
+
+    // ...and it is still drawn: the fix widens the domain by one bucket rather
+    // than clipping the final cell to nothing.
+    expect(Math.max(...rightEdges)).toBeGreaterThan(plotRight - 5);
+    cells.forEach(c => expect(Number(c.getAttribute('width'))).toBeGreaterThan(0));
+  });
+
+  test('the axis spans the panel rather than stopping a gutter short', () => {
+    const { container } = draw();
+    const domain = container.querySelector('.x-axis .domain');
+    const ends = /H([-\d.]+)/.exec(domain.getAttribute('d'));
+    // The range subtracted the left gutter a second time, leaving 50px of dead
+    // space on the right. (d3 offsets the domain path by half a pixel to keep
+    // the line crisp, hence the tolerance rather than an equality.)
+    expect(Math.abs(Number(ends[1]) - (PANEL_WIDTH - MARGIN_RIGHT))).toBeLessThan(1);
+  });
+});
