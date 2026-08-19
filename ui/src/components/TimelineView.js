@@ -5,33 +5,49 @@ import { colorScale } from '../utils/colors.js';
 
 // Fixed chart insets; these never varied at runtime.
 const MARGIN = { top: 5, right: 10, bottom: 20, left: 50 };
-// Each cluster is one group of two bands: coverage, and a deliberately thinner
-// gap band under it. The gap band is a qualifier on the row above rather than a
-// peer of it, so it carries less weight and only one label serves both.
-const COVERAGE_HEIGHT = 20;
-const GAP_HEIGHT = 7;
-const BAND_GAP = 1;      // between a cluster's two bands
+// Both bands in a group are the same height — the height the gap band already
+// had. Neither is the headline the old full-height coverage band was; they are
+// two qualifiers on one cluster, read together.
+export const ROW_HEIGHT = 7;
+const BAND_GAP = 1;      // between the bands of one cluster
 const GROUP_GAP = 7;     // between one cluster and the next
-const GROUP_HEIGHT = COVERAGE_HEIGHT + BAND_GAP + GAP_HEIGHT + GROUP_GAP;
+const ROWS_PER_GROUP = 2;
+const GROUP_HEIGHT =
+  ROWS_PER_GROUP * ROW_HEIGHT + (ROWS_PER_GROUP - 1) * BAND_GAP + GROUP_GAP;
 const MIN_HEIGHT = 100;
 const GAP_COLOR = '#B03A2E';
 
 /**
- * When each cluster's nodes were reporting, and when their readings were blank.
+ * Two things per cluster, over the same time axis.
  *
- * The original version drew "downtime", defined as every selected metric reading
- * exactly zero. That almost never happens: a node that goes away stops emitting
- * rows entirely rather than emitting zeroes, so the view was reliably empty. The
- * server now buckets *presence* against a regular time grid, and each coverage
- * cell is shaded by how much of the cluster reported in that bucket. A bucket
- * nothing reported in is left blank — white, not a grey ground.
+ * **In baseline** is how many of the cluster's *reporting* nodes were behaving
+ * within that baseline — value-wise, not time-wise: a node counts when every
+ * real reading it produced in the bucket falls inside its metric's baseline
+ * value band. Darker is more. The denominator is the nodes actually running in
+ * that bucket, not the cluster's full membership, so an outage lightens the row
+ * only for the nodes that remain.
  *
- * Under each coverage band is a thinner gap band with the encoding inverted:
- * ink is blank readings, counted per (node, metric, timestamp) cell that is
- * null, NaN, or exactly 0.0 — which is what a NaN looks like once the upstream
- * export has filled it in. Counting per reading rather than per row is what
- * makes a metric collapsing to zero across a cluster visible; the row rule
- * needed every metric blank at once and so found nothing.
+ * **Missing** inverts the encoding: ink is blank readings, counted per
+ * (node, metric, timestamp) cell that is null, NaN, or exactly 0.0 — which is
+ * what a NaN looks like once the upstream export has filled it in. Counting per
+ * reading rather than per row is what makes a metric collapsing to zero across
+ * a cluster visible; the row rule needed every metric blank at once and so
+ * found nothing.
+ *
+ * A bucket nothing reported in is left blank — white, not a grey ground — which
+ * reads as "nothing here" rather than as a value. That is also what separates
+ * "no node was in baseline" (the lightest ink) from "no node was running at
+ * all" (no ink).
+ *
+ * This replaced a full-height coverage band that shaded how much of the cluster
+ * reported. Presence is still what the in-baseline row is scored against, so
+ * nothing was lost from the model — only the row that restated it.
+ *
+ * A third band drawing the baseline *window* along the time axis was tried and
+ * removed. The window is per metric, and the union across a full selection
+ * covers almost the whole range — on the bundled sample `proc_run`'s window
+ * alone runs 00:33 to 18:22 — so it drew as a flat bar edge to edge and carried
+ * no information. Don't reintroduce it without scoping it to a single metric.
  */
 const TimelineView = ({ coverage, windowStart, windowEnd, nodeDataStart, nodeDataEnd, hiddenClusters }) => {
     const svgContainerRef = useRef();
@@ -45,8 +61,8 @@ const TimelineView = ({ coverage, windowStart, windowEnd, nodeDataStart, nodeDat
       setBrushEnd(new Date(windowEnd));
     }, [windowStart, windowEnd]);
 
-    // A hidden cluster loses its band pair here too, so the strip agrees with
-    // the heatmap and the charts about which groups are on screen. The rows are
+    // A hidden cluster loses its bands here too, so the strip agrees with the
+    // heatmap and the charts about which groups are on screen. The rows are
     // laid out from this list, so the panel also gives the height back.
     const rows = useMemo(() => {
       const all = coverage?.clusters || [];
@@ -95,16 +111,19 @@ const TimelineView = ({ coverage, windowStart, windowEnd, nodeDataStart, nodeDat
         // gutter a second time and stopped the axis 50px short of the panel.
         .range([MARGIN.left, plotRight]);
 
-      // Laid out by hand rather than with a band scale: the two bands in a
-      // group are deliberately different heights, which a band scale cannot do.
+      // Laid out by hand rather than with a band scale: the bands are a fixed
+      // pixel height with fixed gutters, and a band scale would rescale them
+      // with the cluster count.
       const layout = new Map();
       clusters.forEach((row, index) => {
         const top = MARGIN.top + index * GROUP_HEIGHT;
         layout.set(row.cluster, {
-          coverageY: top,
-          gapY: top + COVERAGE_HEIGHT + BAND_GAP,
+          top,
+          inBaseY: top,
+          gapY: top + ROW_HEIGHT + BAND_GAP,
         });
       });
+      const groupInk = ROWS_PER_GROUP * ROW_HEIGHT + (ROWS_PER_GROUP - 1) * BAND_GAP;
 
       svg.append("g")
         .attr('class', 'x-axis')
@@ -113,15 +132,15 @@ const TimelineView = ({ coverage, windowStart, windowEnd, nodeDataStart, nodeDat
         .selectAll("text")
           .style("font-size", "12px");
 
-      // One label per cluster, centred across both of its bands. The gap band
-      // is not labelled separately — it belongs to the row above it.
+      // One label per cluster, centred across both of its bands. The bands are
+      // not labelled separately — they are one reading, not two.
       const yAxisGroup = svg.append("g").attr('class', 'y-axis');
       clusters.forEach((row) => {
-        const { coverageY } = layout.get(row.cluster);
+        const { top } = layout.get(row.cluster);
         yAxisGroup.append("text")
           .attr("class", "row-label")
           .attr("x", MARGIN.left - 8)
-          .attr("y", coverageY + (COVERAGE_HEIGHT + BAND_GAP + GAP_HEIGHT) / 2)
+          .attr("y", top + groupInk / 2)
           .attr("dy", "0.32em")
           .attr("text-anchor", "end")
           .style("fill", colorScale(row.cluster))
@@ -148,31 +167,35 @@ const TimelineView = ({ coverage, windowStart, windowEnd, nodeDataStart, nodeDat
 
       // Belt and braces against rounding: nothing is drawn past the axis end.
       const cellFrom = (time) => Math.max(Math.min(cellWidth, plotRight - xScale(time)), 0);
+      const stamp = d3.timeFormat("%H:%M");
 
       clusters.forEach((row) => {
-        const { coverageY, gapY } = layout.get(row.cluster);
+        const { inBaseY, gapY } = layout.get(row.cluster);
 
         const cells = row.active.map((active, index) => ({
-          index, active, time: times[index],
+          index,
+          active,
+          inBaseline: row.inBaseline?.[index] || 0,
+          time: times[index],
         })).filter(d => d.time);
 
         svg.append("g")
-          .attr("class", `coverage-c${row.cluster}`)
-          .selectAll(".coverage-cell")
+          .attr("class", `inbase-c${row.cluster}`)
+          .selectAll(".inbase-cell")
+          // A bucket with nothing running is left blank rather than drawn at
+          // the lightest shade: "none of nobody" is not a reading.
           .data(cells.filter(d => d.active > 0))
           .join("rect")
-          .attr("class", "coverage-cell")
+          .attr("class", "inbase-cell")
           .attr("x", d => xScale(d.time))
-          .attr("y", coverageY)
+          .attr("y", inBaseY)
           .attr("width", d => cellFrom(d.time))
-          .attr("height", COVERAGE_HEIGHT)
+          .attr("height", ROW_HEIGHT)
           .attr("fill", colorScale(row.cluster))
-          // Opacity carries the share of the cluster that reported, so a partial
-          // outage is distinguishable from a full one at a glance.
-          .attr("opacity", d => 0.25 + 0.75 * (d.active / Math.max(row.nodeCount, 1)))
+          .attr("opacity", d => 0.15 + 0.85 * (d.inBaseline / d.active))
           .append("title")
-          .text(d => `c${row.cluster} · ${d3.timeFormat("%H:%M")(d.time)} · `
-            + `${d.active}/${row.nodeCount} nodes reporting`);
+          .text(d => `c${row.cluster} · ${stamp(d.time)} · `
+            + `${d.inBaseline}/${d.active} reporting nodes within baseline`);
 
         if (!row.blank?.length) return;
 
@@ -191,11 +214,11 @@ const TimelineView = ({ coverage, windowStart, windowEnd, nodeDataStart, nodeDat
           .attr("x", d => xScale(d.time))
           .attr("y", gapY)
           .attr("width", d => cellFrom(d.time))
-          .attr("height", GAP_HEIGHT)
+          .attr("height", ROW_HEIGHT)
           .attr("fill", GAP_COLOR)
           .attr("opacity", d => 0.15 + 0.85 * (d.blank / d.readings))
           .append("title")
-          .text(d => `c${row.cluster} · ${d3.timeFormat("%H:%M")(d.time)} · `
+          .text(d => `c${row.cluster} · ${stamp(d.time)} · `
             + `${d.blank}/${d.readings} readings missing`);
       });
 
@@ -247,8 +270,8 @@ const TimelineView = ({ coverage, windowStart, windowEnd, nodeDataStart, nodeDat
               marginBottom: '8px',
               marginRight: '10px'
             }}>
-              <LegendSwatch color="#666" opacity={0.35} label="Some reporting" />
-              <LegendSwatch color="#666" opacity={1} label="All reporting" />
+              <LegendSwatch color="#666" opacity={0.3} label="Few in baseline" />
+              <LegendSwatch color="#666" opacity={1} label="Most in baseline" />
               <LegendSwatch color={GAP_COLOR} opacity={0.85} label="Missing" />
             </div>
             <div ref={svgContainerRef} style={{ width: '100%', height: `${height}px` }}></div>

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Input, InputNumber } from 'antd';
+import { Button, Input, InputNumber } from 'antd';
 import { CHART_FONT } from '../config.js';
 import { formatStamp, parseStamp } from '../utils/time.js';
 
@@ -10,7 +10,11 @@ import { formatStamp, parseStamp } from '../utils/time.js';
 // is antd's small-input inset plus its border.
 const FIELD_PAD = '18px';
 const NUMBER_WIDTH = `calc(12ch + ${FIELD_PAD})`;
-const STAMP_WIDTH = `calc(19ch + ${FIELD_PAD})`;
+// `2024-01-01 08:30:00` is 19 characters, but `ch` is the width of a `0` and the
+// two dashes, two colons and the space are all narrower than that in a
+// proportional face — so 19ch bought a gutter of slack. 16ch still clears the
+// string; the input scrolls rather than clipping if a longer form ever arrives.
+const STAMP_WIDTH = `calc(16ch + ${FIELD_PAD})`;
 
 const draftFrom = (baseline) => ({
     vMin: baseline ? baseline.v_min : null,
@@ -41,12 +45,16 @@ const Field = ({ label, children }) => (
  * legible by eye against the axis. Both write through the same `updateBaseline`,
  * so a drag refills these boxes and a commit here moves the rectangle.
  *
+ * "Reset Default" puts the automatically derived window back — that is simply
+ * the metric re-scored with no explicit bounds, since a manual baseline is
+ * never written to the cache.
+ *
  * Committing costs an mrDMD round trip for the metric, so edits land on blur or
  * Enter rather than on each keystroke, and only when the value actually differs
  * from what is already in effect. An edit that doesn't parse, or that inverts
  * either range, reverts rather than being sent.
  */
-const BaselineControls = ({ field, baseline, onCommit, disabled }) => {
+const BaselineControls = ({ field, baseline, onCommit, onReset, disabled }) => {
     const [draft, setDraft] = useState(() => draftFrom(baseline));
     const [invalid, setInvalid] = useState({});
 
@@ -184,6 +192,18 @@ const BaselineControls = ({ field, baseline, onCommit, disabled }) => {
                     onPressEnter={() => commit(draft)}
                 />
             </Field>
+
+            {/* Under the fields rather than beside the heading, because it acts
+                on all four of them: it is the way back out of a hand-edited
+                window that turned out worse than the automatic one. */}
+            <Button
+                size="small"
+                style={{ gridColumn: '1 / -1', marginTop: '4px', fontSize: '11px' }}
+                disabled={disabled || !baseline || !onReset}
+                onClick={() => onReset?.(field)}
+            >
+                Reset Default
+            </Button>
         </div>
     );
 };

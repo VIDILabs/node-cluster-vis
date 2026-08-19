@@ -7,6 +7,7 @@
  *   NCV_TEST_API=http://127.0.0.1:5010 npm test -- --watchAll=false
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { toNaiveISO } from './utils/time.js';
 
 const API = process.env.NCV_TEST_API;
 const maybe = API ? describe : describe.skip;
@@ -92,12 +93,16 @@ maybe('App against a live API', () => {
     // thread pool whose results were never collected.
     expect(new Set(cells.map(c => c.getAttribute('y'))).size).toBe(boxes.length);
 
-    // The timeline draws real coverage rather than sitting empty, which is what
-    // the old all-metrics-read-zero downtime rule produced.
-    expect(container.querySelectorAll('.coverage-cell').length).toBeGreaterThan(0);
+    // The timeline draws a real in-baseline row rather than sitting empty, and
+    // it discriminates: a single opacity across every cell would mean the band
+    // resolution had collapsed. On the sample this spans the full 0..1 range.
+    const inBaseCells = Array.from(container.querySelectorAll('.inbase-cell'));
+    expect(inBaseCells.length).toBeGreaterThan(0);
+    const shades = new Set(inBaseCells.map(c => c.getAttribute('opacity')));
+    expect(shades.size).toBeGreaterThan(1);
 
-    // One label per cluster, covering both of its bands — the gap band is a
-    // qualifier on the row above, not a peer of it, so it is not labelled.
+    // One label per cluster, covering both of its bands — they are one
+    // reading, not two, so only the group is labelled.
     const rowLabels = Array.from(container.querySelectorAll('.y-axis .row-label'))
       .map(t => t.textContent);
     expect(rowLabels.length).toBeGreaterThan(0);
@@ -106,10 +111,13 @@ maybe('App against a live API', () => {
     // rects whose class also begins "gap-c".
     expect(container.querySelectorAll('g[class^="gap-c"]')).toHaveLength(rowLabels.length);
 
-    // Gap bands are drawn shorter than the coverage bands above them.
-    const coverageHeight = Number(container.querySelector('.coverage-cell').getAttribute('height'));
-    const gapHeight = Number(container.querySelector('.gap-cell').getAttribute('height'));
-    expect(gapHeight).toBeLessThan(coverageHeight);
+    // Both bands are the same height, and the full-height reporting band is gone.
+    expect(container.querySelectorAll('.coverage-cell')).toHaveLength(0);
+    const bandHeights = new Set(
+      ['.inbase-cell', '.gap-cell'].map(
+        sel => container.querySelector(sel).getAttribute('height'))
+    );
+    expect(bandHeights.size).toBe(1);
 
     // And they find real blank readings. Counting per (node, metric, timestamp)
     // cell is what makes them fire; the old per-row rule needed every metric
@@ -124,6 +132,115 @@ maybe('App against a live API', () => {
     expect(Number(scatter.getAttribute('height'))).toBeGreaterThan(0);
     expect(container.querySelectorAll('.dr-circle').length).toBe(declaredNodes);
   }, 120000);
+
+  test('a baseline window too short for mrDMD is refused, not a 500', async () => {
+    // A brush drag across a chart opened on the default 30-minute view holds
+    // only a handful of samples on a coarsely sampled export, and mrDMD returns
+    // no nodes below `8 * max_cycles` columns. That surfaced as a 500 from
+    // inside compute_zscore; it is now a 422 the client can report and undo.
+    const { active } = await (await fetch(`${API}/api/datasets`)).json();
+    const metric = active.metrics[0];
+
+    // Taken from the data rather than from a wall-clock offset: "20 minutes"
+    // is a different number of samples on a 15-second export than on a
+    // 5-minute one, and only the sample count decides this.
+    const series = await (await fetch(
+      `${API}/api/series?metrics=${encodeURIComponent(metric)}`)).json();
+    const stamps = [...new Set(series.data.map(row => row.timestamp))].sort();
+    expect(stamps.length).toBeGreaterThan(8);
+    const window = stamps.slice(0, 5);           // 5 < the 8-column floor
+
+    const params = new URLSearchParams({
+      metrics: metric,
+      vMin: '0', vMax: '1',
+      // toNaiveISO, not toISOString: a `Z` would be a tz-aware Timestamp the
+      // frame's naive index cannot be compared against — a different 500.
+      bStart: toNaiveISO(new Date(window[0])),
+      bEnd: toNaiveISO(new Date(window[window.length - 1])),
+    });
+    const response = await fetch(`${API}/api/mrdmd?${params}`);
+
+    expect(response.status).toBe(422);
+    const { error } = await response.json();
+    // Specific enough to act on: how many samples there were, and how many are
+    // needed. A bare "500 Internal Server Error" told the user nothing.
+    expect(error).toMatch(/sample/);
+    expect(error).toMatch(/at least \d+/);
+  });
+
+  test('a time-scoped pass analyses only the window', async () => {
+    const { active } = await (await fetch(`${API}/api/datasets`)).json();
+    const end = new Date(active.end);
+    const start = new Date(+end - 2 * 3600000);      // the last two hours
+    const q = `start=${encodeURIComponent(toNaiveISO(start))}`
+            + `&end=${encodeURIComponent(toNaiveISO(end))}`;
+
+    const full = await (await fetch(`${API}/api/dr`)).json();
+    const scoped = await (await fetch(`${API}/api/dr?${q}`)).json();
+
+    // Every stage moves, contributions included — they are what the metric
+    // list ranks itself by, so a stale set would describe the wrong window.
+    expect(scoped.feat_contributions.features.length)
+      .toBe(full.feat_contributions.features.length);
+    expect(scoped.node_cluster_map.length).toBeGreaterThan(0);
+
+    const labels = (payload) => payload.node_cluster_map
+      .map(r => `${r.nodeId}:${r.Cluster}`).sort().join('|');
+    expect(labels(scoped)).not.toBe(labels(full));
+
+    // mrDMD picks its baseline inside the window rather than across the run.
+    const metric = active.metrics[0];
+    const dmd = await (await fetch(
+      `${API}/api/mrdmd?metrics=${encodeURIComponent(metric)}&${q}`)).json();
+    const baseline = dmd.baselines.find(b => b.feature === metric);
+    expect(new Date(baseline.b_start).getTime()).toBeGreaterThanOrEqual(+start);
+    expect(new Date(baseline.b_end).getTime()).toBeLessThanOrEqual(+end);
+  });
+
+  test('the Time Scope switch rescopes every stage', async () => {
+    const calls = [];
+    const real = global.fetch;
+    global.fetch = (...args) => { calls.push(String(args[0])); return real(...args); };
+
+    try {
+      const { container } = render(<App />);
+      await waitFor(() => expect(container.querySelectorAll('.dr-circle').length)
+        .toBeGreaterThan(0), { timeout: 60000 });
+
+      // Nothing is scoped until the switch is on.
+      expect(calls.some(u => u.includes('/api/dr') && u.includes('start='))).toBe(false);
+
+      const scope = screen.getByText('Time Domain Scope').closest('div')
+        .querySelector('button[role="switch"]');
+      fireEvent.click(scope);
+
+      // The embedding, the contributions, the deviations and the sparklines all
+      // have to move together — a windowed embedding read against full-range
+      // z-scores is worse than either on its own.
+      await waitFor(() => {
+        expect(calls.some(u => u.includes('/api/dr') && u.includes('start='))).toBe(true);
+        expect(calls.some(u => u.includes('/api/mrdmd') && u.includes('start='))).toBe(true);
+        expect(calls.some(u => u.includes('/api/cluster-averages') && u.includes('start='))).toBe(true);
+      }, { timeout: 60000 });
+    } finally {
+      global.fetch = real;
+    }
+  }, 120000);
+
+  test('a window too narrow to analyse names both floors', async () => {
+    // Nodes ramp in over a run, so a window can be long and still nearly empty;
+    // which floor was missed is what tells you to widen it or move it.
+    const { active } = await (await fetch(`${API}/api/datasets`)).json();
+    const end = new Date(active.end);
+    const start = new Date(+end - 5 * 60000);
+    const response = await fetch(`${API}/api/dr?start=${
+      encodeURIComponent(toNaiveISO(start))}&end=${encodeURIComponent(toNaiveISO(end))}`);
+
+    expect(response.status).toBe(422);
+    const { error } = await response.json();
+    expect(error).toMatch(/node/);
+    expect(error).toMatch(/timestamp/);
+  });
 
   test('a metric can be switched off and back on', async () => {
     const { container } = render(<App />);

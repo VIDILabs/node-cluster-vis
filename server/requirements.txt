@@ -1,5 +1,6 @@
 fastparquet==2026.3.0
 Flask==3.1.0
+flask-compress==1.24
 flask-cors==5.0.1
 ipykernel==6.29.5
 ipython==8.32.0

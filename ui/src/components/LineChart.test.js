@@ -5,7 +5,7 @@
  * jsdom does no layout, so clientWidth is stubbed to stand in for a real panel.
  */
 import { render } from '@testing-library/react';
-import LineChart, { formatTick, HEIGHT, MARGIN } from './LineChart.js';
+import LineChart, { formatTick, HEIGHT, MARGIN, roundBounds } from './LineChart.js';
 
 // Imported rather than restated: a local copy goes stale the moment the chart
 // is resized, which is a design change and not a regression. The tests pin the
@@ -253,5 +253,91 @@ describe('LineChart plot furniture', () => {
     // its left and bottom edges at a different weight.
     expect(c.querySelectorAll('.x-axis .domain')).toHaveLength(0);
     expect(c.querySelectorAll('.y-axis .domain')).toHaveLength(0);
+  });
+});
+
+
+describe('roundBounds', () => {
+  test('a dragged bound is rounded to two decimals', () => {
+    // What `yScale.invert` actually returns for a pixel.
+    expect(roundBounds(0.8271604938271605, 12.34567)).toEqual([0.83, 12.35]);
+    expect(roundBounds(53089.0912, 198862.2149)).toEqual([53089.09, 198862.21]);
+  });
+
+  test('a value already at two decimals is left alone', () => {
+    expect(roundBounds(0.25, 12.5)).toEqual([0.25, 12.5]);
+  });
+
+  test('a band narrower than a hundredth keeps full precision', () => {
+    // `cpu_wio` tops out at 0.21 in the sample, so a drag there can easily land
+    // inside one hundredth. Rounding would collapse it to a zero-width band,
+    // which is not a window — and which BaselineControls would then refuse as
+    // an inverted range.
+    const [low, high] = roundBounds(0.001, 0.004);
+    expect(high).toBeGreaterThan(low);
+    expect([low, high]).toEqual([0.001, 0.004]);
+  });
+
+  test('rounding never inverts the band', () => {
+    const [low, high] = roundBounds(0.004999, 0.005001);
+    expect(high).toBeGreaterThan(low);
+  });
+});
+
+describe('a brushed time domain survives a redraw', () => {
+  // The timeline brush applies its range by mutating the chart's scale in
+  // place. Nothing but the live d3 object knew about it, so any redraw rebuilt
+  // the scale from `selectedTimeRange` and snapped the chart back — which is
+  // what a baseline commit started doing once `updateBaseline` gained a
+  // dependency on `baselines` and so changed identity on every commit.
+  //
+  // Local dates, because `d3.timeFormat` labels the axis in local time.
+  const FULL = [new Date(2024, 0, 1, 0, 0), new Date(2024, 0, 1, 18, 0)];
+  const BRUSHED = [new Date(2024, 0, 1, 4, 0), new Date(2024, 0, 1, 8, 0)];
+  const data = series(Array.from({ length: 40 }, (_, i) => i));
+
+  const propsFor = (timeDomainRef) => ({
+    data,
+    field: 'metric',
+    baselinesRef: { current: {} },
+    selectedTimeRange: FULL,
+    timeDomainRef,
+    updateBaseline: () => {},
+    nodeClusterMap: new Map(data.map(d => [d.nodeId, 0])),
+    metadata: { units: 'units' },
+    registerChart: () => {},
+    showBaselines: true,
+    selectedPoints: [],
+  });
+
+  const hours = (container) =>
+    Array.from(container.querySelectorAll('.x-axis .tick text'))
+      .map(t => Number(t.textContent.split(':')[0]));
+
+  test('a redraw keeps the brushed window, not the derived one', () => {
+    const timeDomainRef = { current: null };
+    const props = propsFor(timeDomainRef);
+
+    const { container, rerender } = render(<LineChart {...props} />);
+    expect(Math.max(...hours(container))).toBeGreaterThan(8);
+
+    // What the timeline's event handler records.
+    timeDomainRef.current = BRUSHED;
+    // Any prop change that re-runs the draw effect; `updateBaseline` changing
+    // identity on every baseline commit is the one that regressed this.
+    rerender(<LineChart {...props} updateBaseline={() => {}} />);
+
+    const after = hours(container);
+    expect(after.length).toBeGreaterThan(0);
+    // 04:00-08:00 cannot label an hour outside itself.
+    after.forEach(hour => {
+      expect(hour).toBeGreaterThanOrEqual(4);
+      expect(hour).toBeLessThanOrEqual(8);
+    });
+  });
+
+  test('with nothing brushed the derived window is used', () => {
+    const { container } = render(<LineChart {...propsFor({ current: null })} />);
+    expect(Math.max(...hours(container))).toBeGreaterThan(8);
   });
 });

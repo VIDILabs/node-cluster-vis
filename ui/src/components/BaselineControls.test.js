@@ -24,10 +24,17 @@ const box = (name) => screen.getByLabelText(`mem_free baseline ${name}`);
 
 function draw(overrides = {}) {
   const onCommit = jest.fn();
+  const onReset = jest.fn();
   const utils = render(
-    <BaselineControls field="mem_free" baseline={baseline} onCommit={onCommit} {...overrides} />
+    <BaselineControls
+      field="mem_free"
+      baseline={baseline}
+      onCommit={onCommit}
+      onReset={onReset}
+      {...overrides}
+    />
   );
-  return { onCommit, ...utils };
+  return { onCommit, onReset, ...utils };
 }
 
 // Type into a field and leave it, which is what commits.
@@ -142,5 +149,34 @@ describe('BaselineControls', () => {
 
     expect(box('start')).toHaveValue('2024-01-01 10:00:00');
     expect(box('maximum')).toHaveValue('99');
+  });
+});
+
+describe('resetting to the derived window', () => {
+  test('the button names the metric it acts on', () => {
+    const { onReset } = draw();
+    fireEvent.click(screen.getByRole('button', { name: /reset default/i }));
+    // One metric per chart, so the handler has to be told which one.
+    expect(onReset).toHaveBeenCalledWith('mem_free');
+  });
+
+  test('it does not go through the commit path', () => {
+    // Reset asks the server for the automatic window; it does not send the
+    // values sitting in the boxes, so an edited-but-uncommitted draft must not
+    // ride along with it.
+    const { onCommit, onReset } = draw();
+    fireEvent.change(screen.getByLabelText('mem_free baseline maximum'), {
+      target: { value: '999' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /reset default/i }));
+    expect(onReset).toHaveBeenCalledTimes(1);
+    expect(onCommit).not.toHaveBeenCalled();
+  });
+
+  test('with nothing to reset to, the button is disabled', () => {
+    const { container } = render(
+      <BaselineControls field="mem_free" baseline={undefined} onCommit={() => {}} />
+    );
+    expect(container.querySelector('button')).toBeDisabled();
   });
 });

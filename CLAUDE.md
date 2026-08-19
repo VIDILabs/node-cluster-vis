@@ -102,9 +102,18 @@ titles/units/descriptions and overlays the shared `data/headers/` directory.
 `scripts/anonymize.py` builds a shareable extract: salted-hash node labels,
 timestamps rebased to a neutral epoch, values jittered but clamped to each
 metric's original range. It emits the sidecar too. `server/data/sample_metrics.csv`
-(120 nodes, 8 metrics, ~20k rows, 1.9 MB) is the committed output and is the only
+(120 nodes, 8 metrics, 93k rows, 8.9 MB) is the committed output and is the only
 thing in `server/data/` that git tracks. Nodes cover ~70% of the timestamp grid,
 so the gaps the timeline visualizes are real rather than synthesized.
+
+It is built at **one-minute resolution** — `--nodes 120 --timestamps 1200`
+against a 15-second ganglia export, which strides by 4. `--timestamps` is a
+*cap on the count*, and the stride is `ceil(len(stamps) / timestamps)`, so it
+sets the cadence only indirectly: the previous `240` gave stride 19 and a 4m45s
+spacing, which left a 30-minute window holding 7 samples — below the 8-column
+floor mrDMD needs, so no hand-drawn baseline on a default-opened chart could
+ever be decomposed. Ask for a cadence by working back from the source spacing,
+not by picking a round number.
 
 Metric ranking (`Dataset.rank_metrics`, mirrored in the anonymizer) scores the
 *within-node* coefficient of variation weighted by how often a metric reports.
@@ -124,12 +133,19 @@ and path segments forced a `%`-for-space hack that broke on other characters.
 | `GET /api/metadata` | Per-metric title/units/description |
 | `GET /api/series` | Downsampled per-node series (`metrics`, `nodes`, `maxPoints`) |
 | `GET /api/cluster-averages` | Per-cluster metric means over time |
-| `GET /api/dr` | Embedding, cluster labels, ccPCA contributions |
+| `GET /api/dr` | Embedding, cluster labels, ccPCA contributions (`start`/`end` scope it) |
 | `GET /api/clusters` | Re-label a cached embedding for a new k |
-| `GET /api/mrdmd` | Per-node deviation from a metric baseline |
-| `GET /api/coverage` | Per-cluster reporting presence and blank readings over time (`nodes`, `bins`, `metrics`) |
+| `GET /api/mrdmd` | Per-node deviation from a metric baseline (`start`/`end` scope it) |
+| `GET /api/coverage` | Per-cluster baseline conformance and blank readings over time (`nodes`, `bins`, `metrics`, `baselines`) |
 | `POST /api/stream/next` | Append the next batch and recompute |
 | `GET /api/stream/status` | Batch progress |
+
+Responses are **gzip/brotli compressed** (`flask_compress.Compress(app)`; off by
+default in Flask). `/api/series` is long, highly repetitive JSON — the same node
+ids and timestamp prefixes over and over — and compresses about 7:1, which at
+the sample's one-minute cadence is 30MB down to 4.4MB on the wire. That ratio,
+not the row count, is what decides whether a first load over a network is
+tolerable, so check it before trading away resolution.
 
 ## Backend architecture
 
@@ -173,13 +189,54 @@ longest contiguous in-range window as the baseline → mrDMD over the node × ti
 matrix → baseline z-score, then per-node deviation. Baselines cache per
 (dataset, metric) and are extended one metric at a time as selections change.
 
+**A hand-drawn baseline window has its own floor.** `mrdmd_zscore.mrdmd`
+subsamples at `8 * max_cycles` and returns an *empty node list* below that;
+`compute_zscore` then calls `min()` over it and raises, so an empty list is not
+a degraded answer but a crash. Both call sites pass `max_cycles=1`, making the
+hard floor 8 columns. The automatic path never reaches it — `find_time_range`
+already rejects anything under `MRDMD_MIN_BASELINE_COLUMNS` (16) — but
+`process_baseline`, which serves the manual path, had no check at all, so a
+brush drag narrower than 8 samples came back a 500 from deep inside the
+decomposition — which, on the 4m45s sample this replaced, was every drag on a
+default-opened chart.
+It now raises `BaselineWindowError`, a 422 naming both counts, and the client
+puts the previous window back in the boxes and the rectangle rather than showing
+a baseline the z-scores were never computed against.
+
 A timestamp counts as in-range when `MRDMD_BASELINE_COVERAGE` of the nodes fall
 inside the band, not all of them, and a window shorter than
 `MRDMD_MIN_BASELINE_COLUMNS` is rejected for the full range. Unanimity does not
-survive a realistic node count — one outlier invalidates the whole timestamp, so
-at 120 nodes `cpu_wio`'s longest unanimous window was five columns, too short for
-mrDMD to decompose. It raised, the exception was swallowed by a thread pool whose
-results were never collected, and the metric simply vanished from the heatmap.
+survive a realistic node count — one outlier invalidates the whole timestamp. On
+the 4m45s sample this replaced, `cpu_wio`'s longest unanimous window was five
+columns, too short for mrDMD to decompose: it raised, the exception was swallowed
+by a thread pool whose results were never collected, and the metric simply
+vanished from the heatmap. The denser sample no longer starves it outright — 22
+unanimous columns, just over the 16 minimum — but the margin is the point:
+against `MRDMD_BASELINE_COVERAGE` the same metric gets 178. Requiring every node
+costs roughly 8x the usable baseline, so the failure is one bad export away
+whatever the current numbers say.
+
+**Time scoping** (`server._scoped_frame`). `/api/dr`, `/api/clusters`,
+`/api/mrdmd` and `/api/cluster-averages` take optional `start`/`end` and narrow
+the frame to that window; absent, they see the whole range, which is what every
+caller got before. The window goes **into the cache key** (`<key>_w<startNs>_<endNs>`)
+because every cached artifact downstream — DR1, DR2, baselines — describes the
+rows it was computed from, so reusing a full-range embedding for a window would
+show the wrong thing rather than fail. Keys are integer nanoseconds: stable
+across processes and safe in a filename. Each distinct window costs ~15KB of
+parquet, so cache growth over a session is not worth managing.
+
+`/api/coverage` is deliberately **not** scoped: the timeline is the control
+surface the window is drawn on, so shrinking it to the selection would remove
+the thing being selected.
+
+A window has two floors, checked separately because which one you hit tells you
+what to do: `WINDOW_MIN_NODES` (5) and `MRDMD_MIN_BASELINE_COLUMNS` (16
+timestamps, since the baseline search has to fit inside the window too). Below
+either, `TimeWindowError` returns a 422 naming both counts. The two are separate
+because **nodes ramp in over a run** — in the bundled sample only 7 of 120 are
+reporting in the first hour, reaching all 120 by hour 11 — so an early window can
+be long and still nearly empty, and "widen it" is the wrong advice there.
 
 **Cluster label stability** (`state.align_clusters`): k-means numbers clusters
 arbitrarily, so colors reshuffled on every recompute. Hungarian matching on node
@@ -320,6 +377,13 @@ draw — so a fading toggle was cancelled mid-flight and the switch appeared to 
 nothing. The same helper runs at the end of the draw effect, so a redraw cannot
 bring a hidden brush back.
 
+**A range brushed on the timeline lives in `MetricView`'s `timeDomainRef`, and
+`LineChart` reads it in preference to `selectedTimeRange`.** The brush applies
+its range by mutating each registered chart's `xScale` in place, so nothing but
+the live d3 object knew about it — and every redraw rebuilt the scale from the
+`timeRange` prop and snapped the chart back to the derived 30-minute window. The
+ref is cleared when `timeRange` itself changes, so a dataset swap retires it.
+
 **Keep props to the chart components referentially stable.** `LineChart` is
 memoized and its draw effect depends on `selectedTimeRange`; built inline in
 `App.js`'s JSX that was a new array on every render, so any state change
@@ -341,28 +405,86 @@ extent is flush with it so the last bucket can still be selected. The range is
 `[MARGIN.left, width - MARGIN.right]`; it previously subtracted the left gutter
 a second time and stopped 50px short of the panel.
 
-`TimelineView` draws two bands per cluster: a full-height coverage band and a
-deliberately thinner gap band directly under it, sharing one `c0` label. The gap
-band is a qualifier on the row above rather than a peer of it, so it carries less
-weight and no label of its own. The bands are laid out by hand rather than with a
-`scaleBand`, which cannot give two rows different heights. An empty coverage
-bucket is left **blank** — white, not a grey ground — which reads as "nothing
-here" rather than as a value.
+`TimelineView` draws **two bands per cluster**, both `ROW_HEIGHT` (7px) and
+sharing one `c0` label: in-baseline, then gap. They are one reading rather than
+two peers, so only the group is labelled. The bands are laid out by hand rather
+than with a `scaleBand`, which would rescale them with the cluster count instead
+of holding a fixed pixel height. An empty bucket is left **blank** — white, not
+a grey ground — which reads as "nothing here" rather than as a value.
 
-The gap band inverts the encoding: ink is blank readings. **Blankness is counted
-per reading — one (node, metric, timestamp) cell that is null, NaN, or exactly
-0.0 — not per row.** The per-row rule this replaced required a node to be blank
-across every selected metric simultaneously, which essentially never happens: the
-bundled sample has no all-zero row at all, yet `mem_free`, `bytes_out` and
-`proc_run` each have a timestamp where *every* node reads 0, and `cpu_wio` has
-three where more than half do. Those are the drops plainly visible in the line
-charts, and the row rule found none of them.
+The **in-baseline** band is how many of the cluster's nodes were behaving within
+that baseline — value-wise, not time-wise. Darker is more. **A node counts only
+when every real reading it produced in the bucket falls inside its metric's
+baseline value band**, and **the denominator is the nodes actually reporting in
+that bucket, not the cluster's full membership** — a node that is not reporting
+is not misbehaving, and scoring against membership would darken every outage.
+The strict all-metrics rule is affordable here, unlike the all-metrics-zero rule
+it superficially resembles: measured on the sample it spans the full 0..1 range
+with σ = 0.35 across (cluster, bucket) cells, so the row has real contrast. A
+bucket with nothing running gets no rect at all, which is what separates "none
+of the cluster was in baseline" (the lightest ink, opacity 0.15) from "none of
+it was running" (no ink).
 
-The `metrics` parameter scopes which columns are counted; the UI passes whatever
-is currently selected, so with one metric selected a cluster-wide collapse to
-zero reads as a solid band, and with all eight it reads as one eighth of one.
-A node with no row at all is not a gap — that is what the coverage band above
-already shows.
+This replaced a full-height coverage band that shaded how much of the cluster
+reported. Presence is still in the payload as `active` and is still what the
+in-baseline row is scored against, so nothing was lost from the model — only the
+row that restated it.
+
+A third band drawing the baseline *window* along the time axis was tried and
+removed. The window is per metric, and the union across a full selection covers
+almost the whole range — on the bundled sample `proc_run`'s window alone runs
+01:15 to 18:23 — so it drew as a flat bar edge to edge and carried no
+information. Don't reintroduce it without scoping it to a single metric.
+
+The **gap** band inverts the encoding: ink is blank readings. **Blankness is
+counted per reading — one (node, metric, timestamp) cell that is null, NaN, or
+exactly 0.0 — not per row.** The per-row rule this replaced required a node to be
+blank across every selected metric simultaneously, which essentially never
+happens: the bundled sample has no all-zero row at all, yet `mem_free`,
+`bytes_out` and `proc_run` each have a timestamp where *every* node reads 0, and
+`cpu_wio` has three where more than half do. Those are the drops plainly visible
+in the line charts, and the row rule found none of them.
+
+The `metrics` parameter scopes which columns are counted for both the gap and
+the in-baseline rows; the UI passes whatever is currently selected, so with one
+metric selected a cluster-wide collapse to zero reads as a solid gap band, and
+with all eight it reads as one eighth of one. A node with no row at all is not a
+gap — it is simply absent from the in-baseline denominator.
+
+`/api/coverage` takes the baselines **from the client**, as a JSON `baselines`
+query param, because the window is editable and the server's cache still holds
+the automatically derived one. Only `feature`/`v_min`/`v_max` travel. Anything
+not sent falls back to the cached parquet (read, never computed — the endpoint
+has a ~20ms budget and cannot afford to derive a baseline inline), and a metric
+with neither is left out of the test rather than treated as unbounded. A
+malformed `baselines` param falls back rather than 400ing: the cached bands are
+a correct, if stale, answer, and the strip stays on screen. `TimelineView` itself takes no
+`baselines` prop — they reach it only through the counts the server returns.
+`refreshCoverage` reads them from a **ref**, not from state — five callbacks depend on it,
+and a state dependency would rebuild all of them on every drag; `updateBaseline`
+passes the new array explicitly through `onBaselineChange` because `setBaselines`
+has not committed at that point.
+
+**The Time Scope switch** (beside Streaming) recomputes every stage over the
+timeline's selection: the embedding, the cluster labels, the ccPCA
+contributions, the mrDMD z-scores and the cluster-average sparklines. They move
+together on purpose — a windowed embedding read against full-range deviations is
+worse than either on its own — so `applyTimeScope` refetches all of them rather
+than patching any.
+
+The window lives in `scopeRef`, not in a prop: every fetch callback has to send
+it and none of them should be rebuilt when it changes, which is what would
+redraw every chart on each brush. `scopeSignature` is a *string*, because two
+`Date` objects for the same instant are never `===` and the effect would
+recompute on every render. The effect's first run only records the current
+window, so a page load does not pay for a pass nobody asked for; after that only
+a changed window recomputes. With nothing brushed yet the switch falls back to
+`timeRange`, so flipping it on acts on the window already on screen instead of
+silently doing nothing.
+
+A rescope costs a cold DR pass (~6s on the sample) plus mrDMD (~1s); returning to
+a window already visited is ~0.2s, since the cache key carries it. The brush
+fires on `end` only, so a drag costs one pass, not one per pixel.
 
 `utils/colors.js` owns the cluster palette (Dark2 + Set2, wrapping, so any k up to
 20 stays distinguishable) and the shared z-score diverging scale used by both the
@@ -375,10 +497,23 @@ Per-dataset defaults (nodes, metrics, baseline window, UMAP params) come from
 **The baseline window is editable two ways.** `BaselineControls` puts four
 boxes beside every chart — Min, Max, Start, End — showing the window the server
 derived. Labels sit to the left in one narrow auto-sized column, and each box
-carries its own width in `ch` (12 for a bound, 19 for a timestamp) rather than a
-shared one. A "Baseline Controls" heading spans both columns at the top of each
-group, level with the chart title beside it. Both they and the brush rectangle write through `updateBaseline`, so a
-drag refills the boxes and a typed value moves the rectangle. Each commit is an
+carries its own width in `ch` (12 for a bound, 16 for a timestamp) rather than a
+shared one — `ch` is the width of a `0`, and a timestamp's dashes, colons and
+space are all narrower than that, so 19ch bought a gutter of slack. A "Baseline
+Controls" heading spans both columns at the top of each group, level with the
+chart title beside it, and a **"Reset Default"** button spans them at the
+bottom. Reset is not a commit: it asks `/api/mrdmd` for the metric with *no*
+explicit bounds, which returns the automatically derived window because
+`process_baseline` never writes a manual one back to the cache. Note the reply
+carries a row per *cached* metric, not per requested one, so always resolve it
+with `baselines.find(b => b.feature === field)`. Both they and the brush rectangle write through `updateBaseline`, so a
+drag refills the boxes and a typed value moves the rectangle, and either way the
+z-scores are recomputed for that metric — which repaints the heatmap — and
+`/api/coverage` is refetched, which repaints the timeline's in-baseline row.
+A drag's bounds are rounded to **two decimals at the point of capture**
+(`LineChart.roundBounds`), not formatted on display, so what the boxes show is
+exactly what was sent; a band narrower than a hundredth keeps full precision
+rather than collapsing to a zero-width window. Each commit is an
 mrDMD round trip for that metric, so edits land on blur or Enter, not per
 keystroke, and only when the value differs from what is in effect; a window
 whose range is inverted or unparseable reverts instead of being sent. The boxes
@@ -405,9 +540,9 @@ to end.
 the charts and the timeline brush open on — is derived on the client as the last
 `DEFAULT_WINDOW_MINUTES` (30) of the data, or the whole range when that is
 shorter. Conflating them is how the charts once opened on the first fifth of the
-range. Note the bundled sample samples every ~4m45s over 18h22m, so a 30-minute
-window holds only 7 of its 233 timestamps; the setting suits per-minute telemetry,
-not this extract.
+range. The bundled sample runs at one-minute cadence over 18h23m, so the
+default window holds 30 of its 1104 timestamps — comfortably past the 8 columns
+mrDMD needs, which is what makes a brush-drawn baseline work at all.
 
 `MetricSelect`'s search box and list share one `LIST_WIDTH` (220px) on their
 common wrapper. The box previously filled the column while the list stopped at
@@ -500,6 +635,20 @@ when the clustering changes, which also keeps them off the metric-toggle path.
   past the right end of its own axis while leaving a gutter of dead space.
 - `updateBaseline` sent `Date.toISOString()`, so every manual baseline change —
   every brush drag — reached `/api/mrdmd` as a tz-aware timestamp and 500'd.
+- `updateBaseline` took `baselines` as a `useCallback` dependency, so its
+  identity changed on every commit — and it is in `LineChart`'s draw-effect
+  deps, so every commit redrew every chart and rebuilt the x-scale, discarding
+  whatever range had been brushed on the timeline. It reads the list from a ref
+  instead. Same hazard as the inline `timeRange` array, one level up: a
+  *handler* that churns costs as much as a value that churns.
 - Heatmap and DR hover handlers restored a fixed opacity on mouse-out, which
   permanently un-dimmed whatever had been hovered. They now read
   `data-rest-opacity` off each line.
+- `process_baseline` ran mrDMD on whatever window the brush produced. Under 8
+  columns `mrdmd()` returns `[]` and `compute_zscore` raises `min() iterable
+  argument is empty` — a 500 on essentially every drag, since the charts open on
+  a 30-minute window that holds 7 samples. Guard the column count before the
+  call; there is nothing to recover afterwards.
+- A failed baseline commit left the new window in `baselines` and in
+  `baselinesRef`, so the boxes and the rectangle showed a baseline the server
+  had rejected and the z-scores were never computed against.

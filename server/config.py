@@ -108,6 +108,12 @@ MRDMD_MAX_WORKERS = _env_int('NCV_MRDMD_MAX_WORKERS', 15)
 MRDMD_BASELINE_COVERAGE = _env_float('NCV_MRDMD_BASELINE_COVERAGE', 0.9)
 # Shortest baseline window mrDMD can decompose; below this we use the full range.
 MRDMD_MIN_BASELINE_COLUMNS = _env_int('NCV_MRDMD_MIN_BASELINE_COLUMNS', 16)
+# Floor for a time-scoped analysis window. Nodes come and go over a run — in the
+# bundled sample only 7 of 120 are reporting in the first hour — so a narrow
+# window legitimately holds very few, and UMAP on a handful of points describes
+# nothing. The column floor is MRDMD_MIN_BASELINE_COLUMNS, since the baseline
+# search has to fit inside the window too.
+WINDOW_MIN_NODES = _env_int('NCV_WINDOW_MIN_NODES', 5)
 
 # Number of points per series sent to the browser. Downsampling here is what
 # keeps the payload small for multi-hundred-thousand-row datasets.

@@ -13,9 +13,27 @@ import mrdmd_zscore
 
 ml = config.MRDMD_MAX_LEVELS
 step = config.MRDMD_STEP
+# `mrdmd_zscore.mrdmd` samples at 8x its cycle count and bails out with an empty
+# node list when the window is shorter than that (`nyq = 8 * max_cycles`; both
+# call sites pass `max_cycles=1`). An empty node list is not a degraded
+# answer — `compute_zscore` then calls `min()` over it and raises — so the floor
+# has to be enforced before the call, not recovered from after it.
+MRDMD_MAX_CYCLES = 1
+MIN_MRDMD_COLUMNS = 8 * MRDMD_MAX_CYCLES
 std_baselines_dict = {}
 NODE = config.NODE_COLUMN
 TIME = config.TIME_COLUMN
+
+
+class BaselineWindowError(ValueError):
+    """A manually chosen baseline window mrDMD cannot decompose.
+
+    Carries a 422 rather than a 500: the request was well formed, the window
+    just does not hold enough samples, and the client can say so and put the
+    previous window back.
+    """
+
+    status = 422
 
 
 def _baseline_cache_path(dataset_key):
@@ -106,6 +124,19 @@ def process_baseline(df, col, bmin, bmax, sob, eob):
         sob = pd.to_datetime(sob)
         eob = pd.to_datetime(eob)
         df_col = df_col.loc[:, (df_col.columns >= sob) & (df_col.columns <= eob)]
+
+    # The automatic path never reaches this floor because `find_time_range`
+    # rejects anything under MRDMD_MIN_BASELINE_COLUMNS. A hand-drawn window has
+    # no such guarantee, and a brush drag across a chart opened on the default
+    # 30-minute view holds only a handful of samples on a coarsely sampled
+    # export. Unguarded, that surfaced as a 500 from deep inside compute_zscore.
+    columns = df_col.shape[1]
+    if columns < MIN_MRDMD_COLUMNS:
+        raise BaselineWindowError(
+            f'The baseline window holds {columns} sample'
+            f'{"" if columns == 1 else "s"}; mrDMD needs at least '
+            f'{MIN_MRDMD_COLUMNS} to decompose it. Widen the window.'
+        )
 
     D = df_col.iloc[:,:].to_numpy()
 
@@ -342,6 +373,20 @@ def compute_zscores(df, baselines):
     if NODE in cols:
         Z_final = Z_final.loc[:, ~Z_final.columns.duplicated()]
     return Z_final
+
+def read_cached_baselines(dataset_key):
+    """Whatever baselines are already on disk, computing nothing.
+
+    ``/api/coverage`` runs on every selection change and has a ~20ms budget, so
+    it cannot afford to derive a baseline for a metric that has never been
+    scored. A metric with no cached baseline is simply left out of the in-band
+    test rather than being computed on the spot.
+    """
+    cache_path = _baseline_cache_path(dataset_key)
+    if not os.path.exists(cache_path):
+        return pd.DataFrame(columns=['feature', 'b_start', 'b_end', 'v_min', 'v_max'])
+    return pd.read_parquet(cache_path)
+
 
 def get_cached_or_compute_baselines(df, dataset_key, force_recompute):
     """Baseline z-scores, computed once per (dataset, metric) and reused.

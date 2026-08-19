@@ -35,6 +35,20 @@ const TICK_FONT = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
 const GRID_COLOR = '#e9e9e9';
 const FRAME_COLOR = '#d6d6d6';
 
+// A drag lands on whatever float the pixel happens to map to —
+// `0.8271604938271605`. The boxes beside the chart display these values, so the
+// rounding happens on the way *in* rather than on the way out: what is shown is
+// then exactly what was sent, and editing one bound later cannot silently
+// re-send an unrounded version of the other.
+export function roundBounds(low, high) {
+    const round = (value) => Math.round(value * 100) / 100;
+    const [lo, hi] = [round(low), round(high)];
+    // A metric whose whole range sits inside a hundredth would collapse to a
+    // zero-width band, which is not a window at all — `cpu_wio` tops out at
+    // 0.21 in the bundled sample. Keep full precision in that case.
+    return hi > lo ? [lo, hi] : [low, high];
+}
+
 export function formatTick(value) {
     if (!Number.isFinite(value) || value === 0) return '0';
     const exponent = Math.floor(Math.log10(Math.abs(value)));
@@ -42,7 +56,7 @@ export function formatTick(value) {
     return `${mantissa.toFixed(1)}e${exponent}`;
 }
 
-const LineChart = ({ data, field, baseline, baselinesRef, selectedTimeRange, updateBaseline, nodeClusterMap, metadata, registerChart, showBaselines, selectedPoints, hiddenClusters }) => {
+const LineChart = ({ data, field, baseline, baselinesRef, selectedTimeRange, timeDomainRef, updateBaseline, resetBaseline, nodeClusterMap, metadata, registerChart, showBaselines, selectedPoints, hiddenClusters }) => {
     const svgContainerRef = useRef();
 
     const xScaleRef = useRef();
@@ -126,7 +140,12 @@ const LineChart = ({ data, field, baseline, baselinesRef, selectedTimeRange, upd
         svg.append("rect").attr("class", "plot-frame");
       }
 
-      const xScale = d3.scaleTime().domain(selectedTimeRange).range([MARGIN.left, width - MARGIN.right]);
+      // A range brushed on the timeline is applied by mutating this scale in
+      // place, so it has to be re-read here or every redraw — a resize, a
+      // lasso, a metric toggle — would silently snap the chart back to the
+      // derived window.
+      const domain = timeDomainRef?.current || selectedTimeRange;
+      const xScale = d3.scaleTime().domain(domain).range([MARGIN.left, width - MARGIN.right]);
 
       // Anchor at zero only when the data is non-negative. Metrics that legitimately
       // go negative (temperature deltas, signed counters) were previously clipped
@@ -291,7 +310,8 @@ const LineChart = ({ data, field, baseline, baselinesRef, selectedTimeRange, upd
                 const [[x0, y0], [x1, y1]] = event.selection;
                 const newBaseline = {
                     baselineX: [xScaleRef.current.invert(x0), xScaleRef.current.invert(x1)],
-                    baselineY: [yScaleRef.current.invert(y1), yScaleRef.current.invert(y0)]
+                    baselineY: roundBounds(
+                        yScaleRef.current.invert(y1), yScaleRef.current.invert(y0))
                 };
                 updateBaseline(field, newBaseline);
             });
@@ -314,7 +334,7 @@ const LineChart = ({ data, field, baseline, baselinesRef, selectedTimeRange, upd
       registerChart({ chartEl: svg, xScale, yScale, lines: svg.selectAll(".line"), field, brushGroup: brushGroupRef.current });
       updateBox();
       applyBaselineVisibility();
-      }, [data, selectedTimeRange, nodeClusterMap, field, metadata, registerChart, updateBaseline, updateBox, selectedPoints, width, applyBaselineVisibility, hiddenClusters]);
+      }, [data, selectedTimeRange, timeDomainRef, nodeClusterMap, field, metadata, registerChart, updateBaseline, updateBox, selectedPoints, width, applyBaselineVisibility, hiddenClusters]);
 
     const currentBaseline = baselinesRef.current[field];
     useEffect(() => { updateBox(); }, [currentBaseline, updateBox]);
@@ -339,6 +359,7 @@ const LineChart = ({ data, field, baseline, baselinesRef, selectedTimeRange, upd
           field={field}
           baseline={baseline}
           onCommit={updateBaseline}
+          onReset={resetBaseline}
         />
     </div>
   );

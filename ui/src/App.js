@@ -1,4 +1,4 @@
-import { Card, Col, Layout, Row, Select, Typography, Switch, Alert, Spin, Input, Button, Space } from "antd";
+import { Card, Col, Layout, Row, Select, Typography, Switch, Alert, Spin, Input, Button, Space, Tooltip } from "antd";
 import { useRef, useCallback, useEffect, useMemo, useState } from 'react';
 import './App.css';
 import api from './api.js';
@@ -8,6 +8,7 @@ import MetricSelect from "./components/MetricSelect.js";
 import MetricView from './components/MetricView.js';
 import HeatmapView from './components/HeatmapView.js';
 import TimelineView from './components/TimelineView.js';
+import { toNaiveISO } from './utils/time.js';
 
 const { Header, Content } = Layout;
 
@@ -64,8 +65,21 @@ function App() {
   const [error, setError] = useState(null);
 
   const baselinesRef = useRef({});
+  // Mirrors `baselines` for `refreshCoverage`, which must send them without
+  // taking a dependency on them.
+  const baselinesStateRef = useRef(null);
+  // `{ start, end }` on the wire, or null for the whole range. A ref because
+  // every fetch callback has to send it and none of them should be rebuilt when
+  // it changes — that is what would redraw every chart on each brush.
+  const scopeRef = useRef(null);
 
   const [streamingMode, setStreamingMode] = useState(false);
+  // When on, every stage — DR, clustering, ccPCA contributions, mrDMD, the
+  // cluster-average sparklines — is recomputed over the timeline's selection
+  // instead of the whole run.
+  const [timeScoped, setTimeScoped] = useState(false);
+  const [scopeRange, setScopeRange] = useState(null);
+  const [rescoping, setRescoping] = useState(false);
   const [streamStatus, setStreamStatus] = useState(null);
 
   const totalNodes = DRTData?.length || 0;
@@ -106,13 +120,58 @@ function App() {
     }
   }, []);
 
+  useEffect(() => { baselinesStateRef.current = baselines; }, [baselines]);
+
+  // The window the charts and the timeline brush open on: the tail of the data,
+  // or the whole of it when that is shorter. Distinct from bStart/bEnd, which
+  // are the mrDMD baseline window and answer a different question.
+  //
+  // Also memoized because every LineChart's draw effect depends on it — built
+  // inline in the JSX it was a new array on every render, so any state change
+  // anywhere in the app redrew every chart on screen.
+  const timeRange = useMemo(() => {
+    const start = new Date(dataExtent[0]);
+    const end = new Date(dataExtent[1]);
+    if (Number.isNaN(+start) || Number.isNaN(+end)) {
+      return [new Date(bStart), new Date(bEnd)];
+    }
+    const windowStart = new Date(+end - DEFAULT_WINDOW_MINUTES * 60000);
+    return [windowStart > start ? windowStart : start, end];
+  }, [dataExtent, bStart, bEnd]);
+
+  const effectiveScope = timeScoped ? (scopeRange || timeRange) : null;
+  scopeRef.current = effectiveScope
+    ? { start: toNaiveISO(effectiveScope[0]), end: toNaiveISO(effectiveScope[1]) }
+    : null;
+  // A string, so the effect below compares windows by value; two Date objects
+  // for the same instant are never `===`, which would recompute on every render.
+  const scopeSignature = effectiveScope
+    ? `${toNaiveISO(effectiveScope[0])}/${toNaiveISO(effectiveScope[1])}`
+    : '';
+
+  // The timeline announces its brush; App only acts on it when scoping is on,
+  // but it records the range either way so switching the toggle on uses the
+  // selection already on screen rather than waiting for the next drag.
+  useEffect(() => {
+    const onDomain = (event) => setScopeRange(event.detail);
+    window.addEventListener('time-domain-updated', onDomain);
+    return () => window.removeEventListener('time-domain-updated', onDomain);
+  }, []);
+
   // Coverage is per-cluster but scoped to the current selection, so it answers
   // "when did the nodes I just picked have data".
   // `metrics` scopes the gap row: a row counts as a reading only if one of them
   // is a real value, so the strip describes what the charts are showing.
-  const refreshCoverage = useCallback(async (nodes, metrics) => {
+  // The baselines travel with it because the timeline's in-baseline row is
+  // scored against them and they are editable. They are read from a ref rather
+  // than closed over: five callbacks depend on `refreshCoverage`, and making it
+  // depend on `baselines` would rebuild all of them on every drag of a baseline
+  // rectangle. A caller that already knows the new window passes it explicitly.
+  const refreshCoverage = useCallback(async (nodes, metrics, baselineOverride) => {
     try {
-      setCoverage(await api.coverage(nodes, COVERAGE_BINS, metrics));
+      setCoverage(await api.coverage(
+        nodes, COVERAGE_BINS, metrics, baselineOverride ?? baselinesStateRef.current,
+      ));
     } catch (err) {
       console.error('Could not load coverage', err);
       setCoverage(null);
@@ -128,7 +187,9 @@ function App() {
       setBaselines([]);
       return;
     }
-    const data = await api.mrdmd({ nodes, metrics: dims, recomputeBase: true });
+    const data = await api.mrdmd({
+      nodes, metrics: dims, recomputeBase: true, ...(scopeRef.current || {}),
+    });
     setzScores(data.zscores);
     setBaselines(data.baselines);
     baselinesRef.current = data.baselines.reduce((acc, baseline) => {
@@ -147,7 +208,8 @@ function App() {
   const refreshClusterAverages = useCallback(async (dims) => {
     if (!dims.length) return setAvgSeriesData({});
     try {
-      setAvgSeriesData(await api.clusterAverages(dims));
+      setAvgSeriesData(await api.clusterAverages(dims, undefined, undefined,
+        scopeRef.current?.start, scopeRef.current?.end));
     } catch (err) {
       console.error('Could not load cluster averages', err);
       setAvgSeriesData({});
@@ -245,9 +307,10 @@ function App() {
       const changedEmbedding = useDefaults
         || params.nNeighbors !== nNeighbors
         || params.minDist !== minDist;
+      const scope = scopeRef.current || {};
       const payload = changedEmbedding
-        ? await api.dr({ ...params, force: true })
-        : await api.clusters({ ...params, force });
+        ? await api.dr({ ...params, force: true, ...scope })
+        : await api.clusters({ ...params, force, ...scope });
 
       applyDrPayload(payload);
       await Promise.all([
@@ -291,7 +354,10 @@ function App() {
       // separate reloads.
       const [payload, dmd] = await Promise.all([
         api.series([key], undefined),
-        api.mrdmd({ nodes: allNodes, metrics: [key], recomputeBase: true }),
+        api.mrdmd({
+          nodes: allNodes, metrics: [key], recomputeBase: true,
+          ...(scopeRef.current || {}),
+        }),
       ]);
 
       dmd.baselines.forEach((baseline) => {
@@ -316,6 +382,54 @@ function App() {
       setSelectedDims(selectedDims);
     }
   }, [allNodes, buildMetricData, refreshCoverage, selectedDims, selectedPoints]);
+
+  // Everything is refetched rather than patched: the embedding, the cluster
+  // labels, the ccPCA contributions and the z-scores are all functions of the
+  // rows in scope, and a windowed embedding read against full-range deviations
+  // would be worse than either on its own.
+  const applyTimeScope = useCallback(async () => {
+    setRescoping(true);
+    try {
+      const payload = await api.dr({ force: true, ...(scopeRef.current || {}) });
+      applyDrPayload(payload);
+      await Promise.all([
+        fetchMrdmd(allNodes, selectedDims),
+        refreshClusterAverages(allMetrics),
+        refreshCoverage(selectedPoints, selectedDims),
+      ]);
+      setError(null);
+    } catch (err) {
+      console.error(err);
+      // A window with too few nodes or timestamps comes back as a 422 naming
+      // both floors, which is more use than "recompute failed".
+      setError(`Could not analyse that time range: ${err.message}`);
+    } finally {
+      setRescoping(false);
+    }
+  }, [
+    allMetrics, allNodes, applyDrPayload, fetchMrdmd, refreshClusterAverages,
+    refreshCoverage, selectedDims, selectedPoints,
+  ]);
+
+  // Fires when the toggle flips and on each brush while it is on. The first run
+  // only records the current window, so a page load does not pay for a
+  // recompute nobody asked for; after that only a *changed* window recomputes,
+  // which is what keeps an unrelated re-render from costing a DR pass.
+  const appliedScopeRef = useRef(null);
+  useEffect(() => {
+    if (!activeDataset) return;
+    if (appliedScopeRef.current === scopeSignature) return;
+    const first = appliedScopeRef.current === null;
+    appliedScopeRef.current = scopeSignature;
+    if (!first) applyTimeScope();
+  }, [activeDataset, scopeSignature, applyTimeScope]);
+
+  // A committed baseline — dragged rectangle or typed bound — changes which
+  // nodes count as behaving normally, so the timeline's in-baseline row is
+  // refetched against the window that was just set.
+  const handleBaselineChange = useCallback((nextBaselines) => {
+    refreshCoverage(selectedPoints, selectedDims, nextBaselines);
+  }, [refreshCoverage, selectedDims, selectedPoints]);
 
   // Selection changes nothing that has to be recomputed: the charts already hold
   // every node and fade the ones outside the selection. Only the coverage strip
@@ -372,22 +486,6 @@ function App() {
 
   // --- render -------------------------------------------------------------
 
-  // The window the charts and the timeline brush open on: the tail of the data,
-  // or the whole of it when that is shorter. Distinct from bStart/bEnd, which
-  // are the mrDMD baseline window and answer a different question.
-  //
-  // Also memoized because every LineChart's draw effect depends on it — built
-  // inline in the JSX it was a new array on every render, so any state change
-  // anywhere in the app redrew every chart on screen.
-  const timeRange = useMemo(() => {
-    const start = new Date(dataExtent[0]);
-    const end = new Date(dataExtent[1]);
-    if (Number.isNaN(+start) || Number.isNaN(+end)) {
-      return [new Date(bStart), new Date(bEnd)];
-    }
-    const windowStart = new Date(+end - DEFAULT_WINDOW_MINUTES * 60000);
-    return [windowStart > start ? windowStart : start, end];
-  }, [dataExtent, bStart, bEnd]);
 
   const extentLabel = useMemo(() => formatExtent(dataExtent), [dataExtent]);
 
@@ -433,7 +531,7 @@ function App() {
               </Col>
               <Col>
                 <Select
-                  style={{ width: 230 }}
+                  style={{ width: 200 }}
                   value={activeDataset?.name}
                   onChange={switchDataset}
                   loading={loadingDataset}
@@ -447,7 +545,7 @@ function App() {
               <Col>
                 <Space.Compact>
                   <Input
-                    style={{ width: 260 }}
+                    style={{ width: 220 }}
                     placeholder="or a CSV/Parquet URL or path"
                     value={remoteSource}
                     onChange={(e) => setRemoteSource(e.target.value)}
@@ -475,6 +573,20 @@ function App() {
                   checked={streamingMode}
                   disabled={!activeDataset || streamStatus?.exhausted}
                   onChange={setStreamingMode}
+                />
+              </Col>
+              <Col>
+                <Tooltip title="Recompute the embedding, clusters, feature contributions and mrDMD scores over the Time Domain View's selection. Moving the selection recomputes them again.">
+                  <Text strong italic style={{ fontSize: "14px", paddingRight: '10px' }}>
+                    Time Domain Scope
+                  </Text>
+                </Tooltip>
+                <Switch
+                  size="small"
+                  checked={timeScoped}
+                  loading={rescoping}
+                  disabled={!activeDataset}
+                  onChange={setTimeScoped}
                 />
               </Col>
               <Col>
@@ -547,6 +659,9 @@ function App() {
                         setSelectedDims={setSelectedDims}
                         baselines={baselines}
                         baselinesRef={baselinesRef}
+                        onBaselineChange={handleBaselineChange}
+                        onError={setError}
+                        scopeRef={scopeRef}
                         zScores={zScores}
                         setzScores={setzScores}
                         setBaselines={setBaselines}

@@ -7,18 +7,22 @@ without the caller having to escape them by hand.
 Every response is derived from whichever dataset is currently loaded; see
 ``datasource.py`` for what counts as a valid source.
 """
+import json
 import os
 from timeit import default_timer as timer
 
 import numpy as np
 import pandas as pd
 from flask import Flask, jsonify, request
+from flask_compress import Compress
 from flask_cors import CORS
 
 import config
 import datasource
 from datasource import DataSourceError
-from mrdmd import get_mrdmd, get_mrdmd_with_new_base
+from mrdmd import (
+    BaselineWindowError, get_mrdmd, get_mrdmd_with_new_base, read_cached_baselines,
+)
 from scripts import pipeline
 from state import store
 
@@ -27,6 +31,12 @@ TIME = config.TIME_COLUMN
 
 app = Flask(__name__)
 CORS(app, origins=config.CORS_ORIGINS)
+# The series payload is long, highly repetitive JSON — the same node ids and
+# timestamp prefixes over and over — and compresses about 7:1. At the sample's
+# 1-minute cadence that is 30MB down to 4MB on the wire, which decides whether
+# a first load over a network is tolerable. Off by default in Flask, so it has
+# to be asked for.
+Compress(app)
 
 
 # --- helpers ---------------------------------------------------------------
@@ -34,6 +44,62 @@ CORS(app, origins=config.CORS_ORIGINS)
 @app.errorhandler(DataSourceError)
 def handle_source_error(error):
     return jsonify({'error': str(error)}), error.status
+
+
+@app.errorhandler(BaselineWindowError)
+def handle_baseline_window_error(error):
+    return jsonify({'error': str(error)}), error.status
+
+
+class TimeWindowError(ValueError):
+    """A time-scoped window that holds too little to analyse."""
+
+    status = 422
+
+
+@app.errorhandler(TimeWindowError)
+def handle_time_window_error(error):
+    return jsonify({'error': str(error)}), error.status
+
+
+def _scoped_frame():
+    """The dataset frame, narrowed to ``start``/``end`` when both are given.
+
+    Returns ``(frame, cache_key)``. The key carries the window, because every
+    cached artifact downstream — DR1, DR2, baselines — describes the rows it was
+    computed from; reusing the full-range embedding for a window would show the
+    wrong thing rather than fail.
+
+    Absent bounds mean the whole range, which is what every caller got before
+    time scoping existed.
+    """
+    dataset = store.dataset
+    start, end = request.args.get('start'), request.args.get('end')
+    if not start or not end:
+        return dataset.frame, dataset.key()
+
+    start, end = _naive_timestamp(start), _naive_timestamp(end)
+    if start > end:
+        start, end = end, start
+
+    frame = dataset.frame
+    frame = frame[(frame[TIME] >= start) & (frame[TIME] <= end)]
+
+    stamps = frame[TIME].nunique()
+    nodes = frame[NODE].nunique()
+    # Both floors, named separately: which one you hit tells you whether to
+    # widen the window or move it. Nodes ramp in over a run, so an early window
+    # can be long and still nearly empty.
+    if stamps < config.MRDMD_MIN_BASELINE_COLUMNS or nodes < config.WINDOW_MIN_NODES:
+        raise TimeWindowError(
+            f'That time range holds {nodes} node{"" if nodes == 1 else "s"} over '
+            f'{stamps} timestamp{"" if stamps == 1 else "s"}; the analysis needs at '
+            f'least {config.WINDOW_MIN_NODES} nodes over '
+            f'{config.MRDMD_MIN_BASELINE_COLUMNS} timestamps. Widen the selection.'
+        )
+
+    # Integer nanoseconds: stable across processes and safe in a filename.
+    return frame, f'{dataset.key()}_w{start.value}_{end.value}'
 
 
 def _csv_param(name, default=None):
@@ -220,7 +286,10 @@ def cluster_averages():
     if assignments is None or assignments.empty:
         return jsonify({})
 
-    frame = dataset.frame[[NODE, TIME] + metrics].merge(assignments, on=NODE, how='inner')
+    # Scoped like the embedding: the sparklines sit beside the contribution bars
+    # and would otherwise describe a different span than the bars do.
+    scoped, _ = _scoped_frame()
+    frame = scoped[[NODE, TIME] + metrics].merge(assignments, on=NODE, how='inner')
     if frame.empty:
         return jsonify({})
 
@@ -244,19 +313,55 @@ def cluster_averages():
     return jsonify(result)
 
 
+def _baseline_bands(metrics, cache_key):
+    """``metric -> (v_min, v_max)`` for the baseline currently in effect.
+
+    The client sends the baselines it is actually displaying, because the window
+    is editable: a drag or a typed bound has to move the timeline's in-baseline
+    row too, and the server's cache still holds the automatically derived one.
+    Anything the client does not send falls back to that cache, and a metric
+    with neither is left out of the test entirely rather than being treated as
+    unbounded.
+    """
+    bands = {}
+
+    cached = read_cached_baselines(cache_key)
+    if not cached.empty:
+        for row in cached.itertuples(index=False):
+            bands[row.feature] = (float(row.v_min), float(row.v_max))
+
+    raw = request.args.get('baselines')
+    if raw:
+        try:
+            for entry in json.loads(raw):
+                feature = entry.get('feature')
+                v_min, v_max = float(entry['v_min']), float(entry['v_max'])
+                if feature and v_min <= v_max:
+                    bands[feature] = (v_min, v_max)
+        except (TypeError, ValueError, KeyError):
+            # A malformed override is not worth a 400: the cached bands are a
+            # correct, if stale, answer, and the strip stays on screen.
+            pass
+
+    return {m: bands[m] for m in metrics if m in bands}
+
+
 # --- data coverage ---------------------------------------------------------
 
 @app.route('/api/coverage', methods=['GET'])
 def coverage():
     """Per-cluster reporting coverage and blank readings over the time range.
 
-    Query: optional ``nodes`` (restrict to a selection), ``bins``, ``metrics``.
+    Query: optional ``nodes`` (restrict to a selection), ``bins``, ``metrics``,
+    and ``baselines`` (a JSON array of the windows currently in effect).
 
-    Two things per cluster and bucket. ``active`` is how many of its nodes
+    Three things per cluster and bucket. ``active`` is how many of its nodes
     reported at all — a node that stops reporting simply has no rows, so absence
     cannot be read off the metric values. ``blank``/``readings`` is how many of
     the readings it should have produced were null, NaN, or exactly 0.0, which
     is what a NaN looks like once the upstream export has filled it in.
+    ``inBaseline`` is how many of the *reporting* nodes had every real reading
+    inside its metric's baseline value band.
     """
     dataset = store.dataset
     nodes = _csv_param('nodes')
@@ -294,6 +399,25 @@ def coverage():
     # is a real value. A wholly blank row does not count as presence.
     row_reports = blanks_per_row < len(scoped)
 
+    # "Within baseline behaviour" is a *node* verdict, not a per-reading one: a
+    # node counts only when every real reading it produced lies inside that
+    # metric's baseline value band. The strict rule is affordable here — on the
+    # bundled sample it spans the full 0..1 range with a standard deviation of
+    # 0.37 across (cluster, bucket) cells, so the row has real contrast rather
+    # than sitting at one shade. (A node with no banded reading at all is not a
+    # pass by default; it is simply not counted.)
+    bands = _baseline_bands(scoped, store.key)
+    banded = [m for m in scoped if m in bands]
+    if banded:
+        real = (~blank_cells[banded]).to_numpy()
+        readings = values[banded].to_numpy(dtype=float)
+        low = np.array([bands[m][0] for m in banded], dtype=float)
+        high = np.array([bands[m][1] for m in banded], dtype=float)
+        outside = real & ((readings < low) | (readings > high))
+        row_in_baseline = row_reports & real.any(axis=1) & ~outside.any(axis=1)
+    else:
+        row_in_baseline = np.zeros(len(frame), dtype=bool)
+
     bins = max(_int_param('bins', config.COVERAGE_BINS), 1)
     span = (dataset.end - dataset.start).total_seconds()
     bin_seconds = max(int(np.ceil(span / bins)), 1) if span > 0 else 1
@@ -312,9 +436,14 @@ def coverage():
         'blank': blanks_per_row,
         'readings': len(scoped),
         'reports': row_reports,
+        'inBaseline': row_in_baseline,
     })
     work = work[work['slot'] >= 0]
-    present = work.loc[work['reports'], [NODE, 'slot']].drop_duplicates()
+    # One entry per (node, bucket), as before — but carrying the verdict, so a
+    # node with several rows in a bucket counts as in-baseline only if all of
+    # them were. `min` over booleans is that AND.
+    present = (work.loc[work['reports'], [NODE, 'slot', 'inBaseline']]
+                   .groupby([NODE, 'slot'], as_index=False)['inBaseline'].min())
 
     if assignments is not None and not assignments.empty:
         work = work.merge(assignments, on=NODE, how='left')
@@ -332,6 +461,7 @@ def coverage():
     present = present.dropna(subset=['Cluster'])
 
     counts = present.groupby(['Cluster', 'slot']).size()
+    in_base_counts = present[present['inBaseline']].groupby(['Cluster', 'slot']).size()
     blanks = work.groupby(['Cluster', 'slot'])[['blank', 'readings']].sum()
 
     clusters_out = []
@@ -340,6 +470,11 @@ def coverage():
         if cluster in counts.index.get_level_values(0):
             chunk = counts.loc[cluster]
             active[chunk.index.to_numpy()] = chunk.to_numpy()
+
+        in_baseline = np.zeros(len(edges), dtype=int)
+        if cluster in in_base_counts.index.get_level_values(0):
+            chunk = in_base_counts.loc[cluster]
+            in_baseline[chunk.index.to_numpy()] = chunk.to_numpy()
 
         blank = np.zeros(len(edges), dtype=int)
         readings = np.zeros(len(edges), dtype=int)
@@ -352,6 +487,10 @@ def coverage():
             'cluster': int(cluster),
             'nodeCount': int(size),
             'active': active.tolist(),
+            # Denominator for the in-baseline row is `active`, not `nodeCount`:
+            # a node that is not reporting is not misbehaving, and scoring it
+            # against the cluster's full membership would darken every outage.
+            'inBaseline': in_baseline.tolist(),
             # Per-cluster gap row: blank readings out of the readings the
             # cluster should have produced in that bucket.
             'blank': blank.tolist(),
@@ -370,9 +509,9 @@ def coverage():
 # --- dimensionality reduction ---------------------------------------------
 
 def _dr_payload(n_neighbors, min_dist, num_clusters, force_recompute):
-    dataset = store.dataset
+    frame, cache_key = _scoped_frame()
     df, used = pipeline.get_dr_time(
-        dataset.frame, dataset.key(), n_neighbors, min_dist, num_clusters,
+        frame, cache_key, n_neighbors, min_dist, num_clusters,
         force_recompute=force_recompute,
     )
     df = store.align_clusters(df)
@@ -414,9 +553,9 @@ def clusters():
     if _bool_param('force', False):
         return jsonify(_dr_payload(n_neighbors, min_dist, num_clusters, True))
 
-    dataset = store.dataset
+    frame, cache_key = _scoped_frame()
     df, used = pipeline.recompute_clusters(
-        dataset.key(), len(dataset.nodes), num_clusters, n_neighbors, min_dist
+        cache_key, frame[NODE].nunique(), num_clusters, n_neighbors, min_dist
     )
     if df is None:
         # Nothing cached for these parameters yet, so fall back to a full pass
@@ -442,14 +581,15 @@ def mrdmd_route():
     ``vMin``/``vMax``/``bStart``/``bEnd`` scores against that explicit baseline
     instead of the automatically derived one.
     """
-    dataset = store.dataset
     metrics = _known_metrics(_csv_param('metrics'))
     nodes = _csv_param('nodes')
 
     if not metrics:
         return jsonify({'zscores': [], 'baselines': []})
 
-    frame = dataset.frame
+    # Scoped the same way as the embedding, and keyed the same way: a baseline
+    # cached over the full range describes behaviour the window never saw.
+    frame, cache_key = _scoped_frame()
     if nodes:
         frame = frame[frame[NODE].isin(nodes)]
     frame = frame[[NODE, TIME] + metrics]
@@ -474,7 +614,7 @@ def mrdmd_route():
         )
     else:
         zscores, baselines = get_mrdmd(
-            frame, dataset.key(), _bool_param('recomputeBase', False)
+            frame, cache_key, _bool_param('recomputeBase', False)
         )
 
     return jsonify({
