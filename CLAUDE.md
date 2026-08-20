@@ -11,6 +11,11 @@ It implements the paper cited in `README.md` (Austin et al., ISC 2026).
 
 ## Commands
 
+`./start.sh` runs both halves in one terminal (`--api-only` / `--ui-only` to run
+one), waiting on `/api/health` before starting the dev server and killing the
+whole process tree on Ctrl-C — npm's grandchild keeps the port otherwise. It
+runs nothing that installs; the setup below is still by hand.
+
 Backend:
 
 ```bash

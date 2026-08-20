@@ -14,7 +14,13 @@ We have included an anonymized sample dataset for exploring the interface withou
 - Python3
 - Note: Tested on macOS Tahoe and Ubuntu 24.04 LTS.
 
-### Frontend (React)
+## Quick start
+
+```bash
+./start.sh              
+```
+
+## Frontend (React)
 
 ### Setup
 
@@ -28,6 +34,8 @@ We have included an anonymized sample dataset for exploring the interface withou
 
 1. `cd ui`
 2. `npm run start`
+
+Or `./start.sh --ui-only` from the repository root.
 
 ## Backend (Flask)
 
@@ -52,6 +60,8 @@ We have included an anonymized sample dataset for exploring the interface withou
 1. `cd server`
 2. `source .venv/bin/activate`
 3. `python server.py`
+
+Or `./start.sh --api-only` from the repository root.
 
 ## References
 
