@@ -1,4 +1,4 @@
-import { Card, Form, Select, Button, InputNumber } from "antd";
+import { Card, Select, Button, InputNumber } from "antd";
 import * as d3 from 'd3';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { colorScale } from '../utils/colors.js';
@@ -14,9 +14,6 @@ const { Option } = Select;
 // handler has to restore exactly the resting value; a mismatch made every
 // hovered point grow permanently.
 const POINT_RADIUS = 4;
-
-// Both parameter headings, so they cannot drift apart from each other.
-const SECTION_HEADING = { margin: 0, fontWeight: 'bold', textAlign: 'right' };
 const POINT_RADIUS_HOVER = 8;
 
 // Fallback plot geometry, used before the container has been measured and in
@@ -350,75 +347,58 @@ const DRView = ({ data, type, selectedPoints, nodeClusterMap, handleRecompute, u
                             alignItems: 'stretch',
                         }}
                         >
-                        {/* UMAP Parameters */}
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                            {/* Right-aligned, so each heading sits over the
-                                column of inputs it introduces rather than over
-                                the labels. labelCol + wrapperCol sum to 24
-                                below, which is what puts the inputs in a column
-                                flush with the form's right edge. */}
-                            <p style={SECTION_HEADING}>UMAP Parameters:</p>
-                            <Form
-                                layout="horizontal"
-                                colon={false}
-                                style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}
-                            >
-                            <Form.Item
-                                label="n_neighbors"
-                                labelCol={{ span: 14 }}
-                                wrapperCol={{ span: 10 }}
-                                style={{ marginBottom: '4px' }}
-                            >
-                                <InputNumber
-                                    min={neighborLimits.min}
-                                    max={neighborLimits.max}
-                                    step={neighborLimits.step}
-                                    value={localNNeighbors}
-                                    onChange={(val) => setLocalNNeighbors(val)}
-                                    style={{ width: '100%' }}
-                                />
-                            </Form.Item>
+                        {/* A plain two-column grid, not an antd Form. Nothing
+                            here is bound by name — the controls are all
+                            explicitly controlled, and the comment below says
+                            why — so Form was only ever doing layout, and its
+                            24-column labelCol/wrapperCol arithmetic was both
+                            fiddlier and looser than one grid line. Each section
+                            heading spans both columns and is right-aligned, so
+                            it sits over the inputs rather than the labels. */}
+                        <div className="dr-params">
+                            <p className="dr-params-heading">UMAP Parameters</p>
 
-                            <Form.Item
-                                label="min_dist"
-                                labelCol={{ span: 14 }}
-                                wrapperCol={{ span: 10 }}
-                                style={{ marginBottom: '4px' }}
+                            <span className="dr-params-label">n_neighbors</span>
+                            <InputNumber
+                                size="small"
+                                aria-label="n_neighbors"
+                                min={neighborLimits.min}
+                                max={neighborLimits.max}
+                                step={neighborLimits.step}
+                                value={localNNeighbors}
+                                onChange={(val) => setLocalNNeighbors(val)}
+                            />
+
+                            <span className="dr-params-label">min_dist</span>
+                            <InputNumber
+                                size="small"
+                                aria-label="min_dist"
+                                min={distLimits.min}
+                                max={distLimits.max}
+                                step={distLimits.step}
+                                value={localMinDist}
+                                onChange={(val) => setLocalMinDist(val)}
+                            />
+
+                            <p className="dr-params-heading">K-Means</p>
+
+                            <span className="dr-params-label">Num clusters</span>
+                            {/* Deliberately not bound to a Form by name: antd
+                                would then own the value and ignore the
+                                controlled `value` here, which left the dropdown
+                                stale after a reset. */}
+                            <Select
+                                size="small"
+                                aria-label="Num clusters"
+                                value={localNumClusters}
+                                onChange={(val) => setLocalNumClusters(val)}
                             >
-                                <InputNumber
-                                    min={distLimits.min}
-                                    max={distLimits.max}
-                                    step={distLimits.step}
-                                    value={localMinDist}
-                                    onChange={(val) => setLocalMinDist(val)}
-                                    style={{ width: '100%' }}
-                                />
-                            </Form.Item>
-                            {/* K-Means */}
-                            <p style={SECTION_HEADING}>K-Means:</p>
-                            {/* Not bound to the Form by name: antd would then own the
-                                value and ignore the controlled `value` below, which
-                                left the dropdown stale after a reset. */}
-                            <Form.Item
-                                label="Num clusters"
-                                labelCol={{ span: 14 }}
-                                wrapperCol={{ span: 10 }}
-                                style={{ marginBottom: 0 }}
-                            >
-                                <Select
-                                    style={{ width: '100%' }}
-                                    value={localNumClusters}
-                                    onChange={(val) => setLocalNumClusters(val)}
-                                >
                                 {clusterOptions.map((num) => (
-                                    <Option key={num} value={num}>
-                                    {num}
-                                    </Option>
+                                    <Option key={num} value={num}>{num}</Option>
                                 ))}
-                                </Select>
-                            </Form.Item>
-                            </Form>      
-                        </div>               
+                            </Select>
+                        </div>
+              
                         <div
                             style={{
                                 display: "flex",

@@ -345,10 +345,14 @@ the panel's width and the scatter took what was left — backwards, since the
 embedding is why the panel exists. Stacked, the panel can be as narrow as the
 plot wants to be.
 
-In the parameter form, `labelCol` + `wrapperCol` must sum to 24. They summed to
-26 and 29, which overran antd's grid and wrapped each input onto its own line —
-so there was no column of inputs for the **right-aligned** section headings
-(`SECTION_HEADING`) to sit above.
+The parameter form is a **two-column CSS grid** (`.dr-params`), not an antd
+`Form`. Nothing in it is bound by name — every control is explicitly controlled,
+deliberately, since a bound `Select` ignores the controlled `value` and goes
+stale after a reset — so `Form` was only ever doing layout, and its
+`labelCol`/`wrapperCol` arithmetic had to be kept summing to 24 (it didn't: 26
+and 29, which wrapped every input onto its own line). Labels are the first
+column, controls the second, and each section heading spans both and is
+right-aligned so it sits over the controls rather than the labels.
 
 **The plot is measured against the stack, minus the controls' own height** —
 never against its own slot. The slot is sized to the plot, so measuring it would
@@ -705,6 +709,16 @@ use, and the surplus shows as a band of empty space to the left of the charts.
 gutter and inside that column width — and the two have to agree or the list is
 clipped.
 
+**One metric ordering for the whole dashboard** (`utils/contributions.js`,
+`byContribution`): most discriminating first, by `maxAbsContribution` over the
+ccPCA matrix. `MetricSelect` orders the list with it and `MetricView` orders the
+charts with it, from the same function — the charts previously ran in
+`selectedDims` order, which is the order metrics were switched *on*, so reading
+a chart meant hunting for its metric in a list sorted by something else. Ties and
+metrics the server sent no contributions for fall back to arrival order, so
+switching one metric off cannot reshuffle the rest. `List.Item` carries
+`data-metric` so the two orders can be compared in a test.
+
 Cluster averages (the sparklines in the metric list) are fetched for **every**
 metric, not the selected ones — the list is what you choose from, so a blank
 sparkline on an unselected metric defeats its purpose. They only need refetching
@@ -787,6 +801,8 @@ when the clustering changes, which also keeps them off the metric-toggle path.
   pixel-sized heatmap column. Flex line-breaking uses the basis, not the shrunk
   width, so the row wrapped and the embedding and heatmap landed below the fold.
   Basis 0 plus `wrap={false}`; `min-width: 0` does not help here.
+- The line charts ran in `selectedDims` order while the metric list ran in
+  ccPCA-contribution order, so the two never agreed.
 - The heatmap's node axis was appended after its metric axis, so node labels
   scrolled *over* the metric names instead of disappearing behind them. (Before
   the map was rotated this was the same bug with the axes swapped.)

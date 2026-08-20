@@ -210,3 +210,44 @@
   display: flex;
   justify-content: center;
 }
+
+/* --- Node Similarity parameter form ----------------------------------------
+   Two columns: labels left, controls right on a single grid line each. This
+   replaced an antd Form whose labelCol/wrapperCol arithmetic had to be kept
+   summing to 24 and still left the rows loosely aligned; nothing here is bound
+   by name, so Form was only ever doing layout. */
+.dr-params {
+  display: grid;
+  grid-template-columns: 1fr 86px;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+/* Spans both columns and sits flush right, over the controls it introduces
+   rather than over the labels. */
+.dr-params-heading {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-weight: 600;
+  font-size: 13px;
+  text-align: right;
+}
+
+/* Air above a second section, none above the first. */
+.dr-params > .dr-params-heading:not(:first-child) {
+  margin-top: 6px;
+}
+
+.dr-params-label {
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The controls are the second column outright, so they line up with each other
+   and with the heading's right edge whatever their intrinsic width. */
+.dr-params > .ant-input-number,
+.dr-params > .ant-select {
+  width: 100%;
+}

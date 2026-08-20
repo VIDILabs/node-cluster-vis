@@ -3,6 +3,7 @@ import { SearchOutlined } from "@ant-design/icons";
 import React, { useMemo, useState } from 'react';
 import FeatureContributionBarGraph from "./FeatureContributionBarGraph";
 import { colorScale } from '../utils/colors.js';
+import { byContribution, contributionsFor } from '../utils/contributions.js';
 
 const SPARK_WIDTH = 60;
 const SPARK_HEIGHT = 20;
@@ -28,32 +29,6 @@ function smoothSeries(series, windowSize = 5, maxPoints = 40) {
     return smoothed.filter((_, i) => i % step === 0);
   }
   return smoothed;
-}
-
-/**
- * Feature-contribution rows are indexed by the *server's* feature ordering, not
- * by whatever order the metric list happens to be in. Looking the name up in
- * `fcs.features` is what keeps each bar attached to the metric it describes.
- */
-function contributionsFor(fcs, metric) {
-  if (!fcs?.features || !fcs.agg_feat_contrib_mat) return [];
-  const rowIndex = fcs.features.indexOf(metric);
-  if (rowIndex === -1) return [];
-  const row = fcs.agg_feat_contrib_mat[rowIndex];
-  if (!row) return [];
-
-  // order_col is a permutation of column indices giving the optimal-leaf order;
-  // each column maps to the cluster label at the same position in fcs.clusters.
-  return fcs.order_col.map((columnIndex) => ({
-    cluster: fcs.clusters?.[columnIndex] ?? columnIndex,
-    value: row[columnIndex] ?? 0,
-  }));
-}
-
-function maxAbsContribution(fcs, metric) {
-  const bars = contributionsFor(fcs, metric);
-  if (!bars.length) return -Infinity;
-  return Math.max(...bars.map((b) => Math.abs(b.value)));
 }
 
 function Sparkline({ points, color }) {
@@ -95,9 +70,10 @@ function MetricSelect({ selectedDims, headerMap, metrics, fcs, avgSeriesData, on
 
   const filteredFeatures = useMemo(() => {
     const needle = searchTerm.toLowerCase();
-    return features
-      .filter((f) => f.toLowerCase().includes(needle))
-      .sort((a, b) => maxAbsContribution(fcs, b) - maxAbsContribution(fcs, a));
+    const matching = features.filter((f) => f.toLowerCase().includes(needle));
+    // The charts in MetricView are laid out in this same order, so a chart can
+    // be found by where its metric sits in this list.
+    return byContribution(fcs, matching);
   }, [features, fcs, searchTerm]);
 
   // The contribution bars and the sparklines are read as one stack per row, so
@@ -140,7 +116,7 @@ function MetricSelect({ selectedDims, headerMap, metrics, fcs, avgSeriesData, on
           const clusterSeries = avgSeriesData?.[key] || {};
 
           return (
-            <List.Item key={key} style={{ display: "flex", alignItems: "flex-start", padding: "5px 10px" }}>
+            <List.Item key={key} data-metric={key} style={{ display: "flex", alignItems: "flex-start", padding: "5px 10px" }}>
               <div style={{ display: 'flex', flexDirection: 'column', flexGrow: 1 }}>
                 <Tooltip
                   title={(

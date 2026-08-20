@@ -100,6 +100,16 @@ maybe('App against a live API', () => {
     expect(listCol.nextElementSibling.style.flex).toMatch(/^1 1 0(px)?$/);
     expect(listCol.parentElement.className).toContain('ant-row-no-wrap');
 
+    // The charts are laid out in the metric list's order. They used to run in
+    // the order metrics were switched on, so reading a chart meant hunting for
+    // its metric in a list sorted by something else.
+    const listOrder = Array.from(listCol.querySelectorAll('[data-metric]'))
+      .map((item) => item.dataset.metric);
+    const chartOrder = Array.from(container.querySelectorAll('.chart-title'))
+      .map((title) => title.textContent);
+    expect(listOrder.length).toBeGreaterThan(1);
+    expect(chartOrder).toEqual(listOrder);
+
     // Nodes run down the rows and metrics across the columns.
     const declaredNodes = Number(/Nodes:\s*(\d+)/.exec(container.textContent)[1]);
     const cells = Array.from(container.querySelectorAll('.heatmap-cell'));

@@ -1,18 +1,19 @@
 import * as d3 from 'd3';
-import { useCallback, useState, useEffect, useRef } from 'react';
+import { useCallback, useMemo, useState, useEffect, useRef } from 'react';
 import { Switch, Space } from 'antd';
 import LineChart from './LineChart.js';
 import api from '../api.js';
 import { colorScale, COLORS } from '../utils/colors.js';
 import { CHART_FONT } from '../config.js';
 import { toNaiveISO } from '../utils/time.js';
+import { byContribution } from '../utils/contributions.js';
 
 // Room for the scroller's own scrollbar. The baseline boxes are the rightmost
 // thing in this panel, so without it an overlay scrollbar — one that takes no
 // layout width — prints straight over the End and Max fields.
 const SCROLLBAR_GUTTER = 14;
 
-const MetricView = ({ data, timeRange, selectedDims, selectedPoints, zScores, setzScores, setBaselines, baselines, baselinesRef, onBaselineChange, onError, scopeRef, nodeClusterMap, headerMap, hiddenClusters }) => {
+const MetricView = ({ data, timeRange, selectedDims, selectedPoints, fcs, zScores, setzScores, setBaselines, baselines, baselinesRef, onBaselineChange, onError, scopeRef, nodeClusterMap, headerMap, hiddenClusters }) => {
     const chartsRef = useRef([]);
     const selectedTimeRange = timeRange;
     const [showBaselines, setShowBaselines] = useState(true);
@@ -226,6 +227,13 @@ const MetricView = ({ data, timeRange, selectedDims, selectedPoints, zScores, se
     // Newly loaded metrics are prepended, so the first match is the live one.
     const baselineFor = (field) => baselines?.find(b => b.feature === field);
 
+    // The charts run in the metric list's order, not in whatever order metrics
+    // were switched on. Reading a chart means finding its metric in the list
+    // first, and two different orders make that a search rather than a glance.
+    // `selectedDims` is the *selection*, which is arrival-ordered — the list is
+    // the ordering, and both go through `byContribution` to get it.
+    const orderedDims = useMemo(() => byContribution(fcs, selectedDims), [fcs, selectedDims]);
+
     if (!data || !baselines) return null;
 
     // height:100% fills the card; the max-height is a floor under it so a height
@@ -275,7 +283,7 @@ const MetricView = ({ data, timeRange, selectedDims, selectedPoints, zScores, se
             />
           </Space>
         </div>
-        {nodeClusterMap.size > 0 && selectedDims.map((field, index) => {
+        {nodeClusterMap.size > 0 && orderedDims.map((field, index) => {
             return (
                 <LineChart 
                     key={`chart-${field}`}
