@@ -10,7 +10,7 @@ const SPARK_HEIGHT = 20;
 // box used to fill the column while the list stopped at 300, which read as two
 // unrelated things stacked. Narrow, because this is a list of names: the width
 // the charts get back is worth more than a wider ellipsis threshold.
-const LIST_WIDTH = 220;
+export const LIST_WIDTH = 220;
 
 function smoothSeries(series, windowSize = 5, maxPoints = 40) {
   if (!series || series.length === 0) return [];

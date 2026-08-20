@@ -335,6 +335,32 @@ Views: `DRPlot` (UMAP scatter, lasso select, UMAP/k controls) → `MetricView`/
 metric z-scores) → `TimelineView` (per-cluster data coverage) → `MetricSelect` +
 `FeatureContributionBarGraph` (metrics ranked by ccPCA contribution).
 
+**`DRPlot` is a square plot with its controls stacked underneath** (`.dr-stack`
+/ `.dr-plot-slot` in `App.css`). Square because `E1` and `E2` are two axes of one
+embedding with no units of their own: a rectangular box stretches one of them and
+the distances the clustering is read from stop being comparable between the two
+directions. The side is `min(slot width, slot height)`, floored at
+`MIN_SIDE`. The controls used to sit *beside* the plot, which meant the form set
+the panel's width and the scatter took what was left — backwards, since the
+embedding is why the panel exists. Stacked, the panel can be as narrow as the
+plot wants to be.
+
+In the parameter form, `labelCol` + `wrapperCol` must sum to 24. They summed to
+26 and 29, which overran antd's grid and wrapped each input onto its own line —
+so there was no column of inputs for the **right-aligned** section headings
+(`SECTION_HEADING`) to sit above.
+
+**The plot is measured against the stack, minus the controls' own height** —
+never against its own slot. The slot is sized to the plot, so measuring it would
+be measuring our own output, and the two would ratchet each other larger on every
+pass. It also has to be `flex: 0 0 auto`: letting the slot absorb the column's
+slack put the controls at the bottom of the card with a band of dead space
+between them and the plot they belong to. The leftover falls below the controls
+instead. `STACK_GAP` in `DRPlot.js` mirrors `gap` on `.dr-stack`, since the space
+the plot may take is measured across it. The observer watches the controls as
+well as the stack: `ClusterToggles` gains a button per cluster, and a large k
+wraps onto a second line.
+
 **Selection is drawn, not filtered** (`config.js` `OPACITY`). Every view renders
 the whole node set and dims what isn't selected. The one deliberate exception is
 the per-cluster show/hide buttons (`ClusterToggles`): those are an explicit
@@ -342,10 +368,33 @@ request for the marks to go, so every view *filters* on them. All clusters start
 on, and the hidden set resets whenever k changes — a stale one would leave nodes
 invisible with no button switched off to explain it.
 
+**The dashboard is three columns**, left to right: the time-and-series reading
+(`TimelineView` over the Metric Reading card), the embedding (`DRPlot`,
+`span={6}`), and the per-node deviations (`HeatmapView`).
+
+The heatmap column is sized **in pixels, not 24ths** — `HeatmapView.panelWidth`,
+one `CELL.width` per metric plus both gutters plus the card's own chrome, with a
+`MIN_PANEL_WIDTH` floor so the card's title and sort control stay legible. The
+map has an exact natural width and nothing to spend anything beyond it on, so a
+span would leave a strip of dead space beside it. It is derived from the
+*z-scores*, not from `selectedDims`: a metric whose baseline could not be
+computed has no column in the map. `DRPlot` is narrow for its own reason — the
+scatter is square, so its width is bounded by the column's height.
+
+The reading column takes what is left, as **`flex="1 1 0"` on a `wrap={false}`
+row** — not `flex="auto"`, and not by relying on `min-width: 0`. A flex row
+breaks lines on its items' *hypothetical* sizes, which is their flex-basis,
+before any shrinking is considered; `auto` makes that basis the column's content
+width, and `min-width: 0` does not reduce it. The reading column therefore
+measured wider than the space left and pushed the embedding and the heatmap onto
+a second line, below the fold. A basis of 0 asks for nothing up front. The
+column's `min-width` is the floor past which the row overflows sideways rather
+than squeezing the charts to nothing. `App.test.js` pins both halves.
+
 `ClusterToggles` is rendered in **exactly one place**: the Node Similarity
 panel, under Recompute / Reset Defaults, next to the k control that decides how
 many clusters there are. `hiddenClusters` lives in `App` and every view reads
-it — `DRPlot` drops those points, `HeatmapView` those columns, `LineChart` those
+it — `DRPlot` drops those points, `HeatmapView` those rows, `LineChart` those
 polylines, `TimelineView` those band pairs, and `MetricSelect` the matching
 contribution bars *and* sparklines (both, or the two stacks stop lining up).
 `DRPlot` still builds its scales from the full embedding, so hiding a cluster
@@ -406,43 +455,67 @@ them reads as a hierarchy that isn't there. `LineChart`'s `MARGIN` and
 re-checking the gutters. `MetricView` re-calls the x-axis on a shared time-domain
 change and imports `CHART_FONT` rather than repeating a number.
 
-`HeatmapView`'s two axes live in one overlay SVG above the scrolling column
-strip, and **document order decides which one wins the gutter**. Node labels are
-rotated 65 degrees, so each label's tail reaches left of the column it belongs
-to, and scrolling the columns right slides more of them into the metric-name
-gutter. The x-axis is therefore appended *first* and the y-axis last: its white
-ground, then the metric names, paint over those tails, so a label slides behind
-the axis instead of overprinting it.
+**`HeatmapView` runs nodes down the rows and metrics across the top.** The node
+axis is the long one — hundreds of nodes against a dozen metrics — so putting it
+vertically gives a column of names that reads straight off, where the same list
+along the bottom had to be rotated 65 degrees and read at an angle. It also puts
+the map's long axis along the page's, which is what lets the panel be narrow
+enough to sit beside the embedding.
 
-`HeatmapView` tethers its x-axis to the bottom of the last row and only scrolls
-vertically once the rows outgrow `MAX_ROWS_HEIGHT`. **A cell is `CELL.width` ×
-`CELL.height` (20 × 20) whatever the node count** — the rows scroll horizontally
-when they don't fit, rather than the cells being squeezed. Sizing them to the
-panel meant the same z-score was drawn at a different size depending on how many
-clusters happened to be visible: readable with one cluster on, slivers with four.
-The panel is what gives, not the encoding. (`LABEL_MIN_WIDTH`, from
-`CHART_FONT.axis` and the 65° label rotation, still thins tick labels, but the
-fixed width clears it so nothing is dropped in practice.) A `Segmented` control
-in the card header orders columns by
-name (natural sort) or by cluster — cluster order puts each k-means group in one
-contiguous block, which is what makes a whole-cluster excursion legible as a band.
+Its two axes live in one overlay SVG above the scrolling strip, and **document
+order decides which one wins the gutter**. The node labels are the ones that
+move: they scroll vertically with the rows, so scrolling down slides them up into
+the metric-name gutter. The outer SVG clips anything above its own top edge, but
+between there and `MARGIN.top` nothing hides them — so the x-axis is appended
+*last*, and its white ground, then the metric names, paint over them. Its
+background spans the full width including the node gutter, because that is where
+the collision happens; no metric label reaches back into it, so covering it costs
+nothing. (This is the reverse of the pre-rotation order, which had the same
+problem the other way round.)
+
+`MARGIN.top` (120) is arithmetic, not a guess, and has to be re-checked if
+`CHART_FONT.label` or `METRIC_LABEL_ANGLE` moves: a rotated label's vertical
+reach is its length × sin(angle), plus 9px of tick offset and ~8px of dx/dy
+nudge. `Missed Buffers_P1` is ~115px at 14px sans, so 115 × sin(55°) + 17 ≈ 111.
+A longer name is clipped by the top of the overlay rather than pushing the map
+down, which is the right trade at a dozen metrics. 55° rather than 45° because
+at 45° a 14px label needs 19.8px of horizontal room against a 20px cell — no
+clearance at all.
+
+The rows take the card's slack and scroll past it; `MAX_ROWS_HEIGHT` is only the
+floor the panel is guaranteed and the fallback before it has been measured.
+**A cell is `CELL.width` × `CELL.height` (20 × 20) whatever the node count** —
+the rows scroll vertically when they don't fit, rather than the cells being
+squeezed. Sizing them to the panel meant the same z-score was drawn at a
+different size depending on how many clusters happened to be visible: readable
+with one cluster on, slivers with four. The panel is what gives, not the
+encoding. Both axes keep a thinning guard (`LABEL_MIN_WIDTH` for the rotated
+metric names, `LABEL_MIN_HEIGHT` for the level node names), but the fixed cell
+size clears both, so nothing is dropped in practice. A `Segmented` control in the
+card header orders *rows* by name (natural sort) or by cluster — cluster order
+puts each k-means group in one contiguous block, which is what makes a
+whole-cluster excursion legible as a band.
 `HeatmapView.test.js` and `LineChart.test.js` pin this geometry by stubbing
 `clientWidth`/`clientHeight`, since jsdom does no layout.
 
-**Panel heights** (`App.css`, `.dashboard-column` / `.panel-fill`). The two
-columns have to end level, and neither can do that from a content height: the
-left column's charts and the right column's heatmap both grow with the metric
-count. The height is set **on the column** — `calc(100vh - 96px)`, the chrome
-above and below it — and one card per column carries `panel-fill` to absorb the
-slack: the metric-reading card on the left, the DR card on the right.
+**Panel heights** (`App.css`, `.dashboard-column` / `.panel-fill`). The three
+columns have to end level, and none of them can do that from a content height:
+the charts, the scatter and the heatmap all grow with what is selected. The
+height is set **on the column** — `calc(100vh - 96px)`, the chrome above and
+below it — and exactly one card per column carries `panel-fill` to absorb the
+slack: the metric-reading card, the DR card, the heatmap card.
+
+`MetricView`'s scroller carries a `SCROLLBAR_GUTTER` of right padding and
+`scrollbar-gutter: stable`. The baseline boxes are the rightmost thing in the
+panel and used to end flush with the scrolling edge, so an overlay scrollbar —
+which takes no layout width — printed over the End and Max fields. The padding
+is on the scroller rather than on each row, so the legend, the charts and the
+boxes all share one right edge.
 
 Do not try to inherit that height down a chain of `height: 100%` from `Content`
 through `Spin` and `Row`. It does not resolve — antd's spin wrapper and `Row` are
 not definite-height boxes — and the columns silently fall back to content height,
-which runs the charts off the bottom of the page. For the same reason `DRPlot`'s
-scatter `Row` must not carry `align="top"`: that pins every column to
-`flex-start` and defeats the stretch its height depends on (the parameter form
-gets `alignSelf: 'flex-start'` instead). `MetricView`'s scroller and
+which runs the charts off the bottom of the page. `MetricView`'s scroller and
 `MetricSelect`'s list keep a `calc(100vh - …)` **max**-height as a floor under
 the flex sizing, so a chain that fails scrolls rather than overflowing.
 
@@ -622,9 +695,15 @@ mrDMD needs, which is what makes a brush-drawn baseline work at all.
 
 `MetricSelect`'s search box and list share one `LIST_WIDTH` (220px) on their
 common wrapper. The box previously filled the column while the list stopped at
-`maxWidth: 300`, which read as two unrelated controls stacked. The column is
-`span={6}` against the charts' `span={18}`; the width the charts get back pays
-for the baseline boxes.
+`maxWidth: 300`, which read as two unrelated controls stacked. `LIST_WIDTH` is
+**exported**, and the metric-list column is sized from it — `flex: 0 0
+LIST_WIDTH + METRIC_GUTTER` on a `wrap={false}` row, with the charts on
+`flex="1 1 0"` beside it. A span cannot work here: the list caps itself at
+`LIST_WIDTH`, so any fraction of a column that grows hands it width it will not
+use, and the surplus shows as a band of empty space to the left of the charts.
+`METRIC_GUTTER` is named in `App.js` because it appears twice — as the row's
+gutter and inside that column width — and the two have to agree or the list is
+clipped.
 
 Cluster averages (the sparklines in the metric list) are fetched for **every**
 metric, not the selected ones — the list is what you choose from, so a blank
@@ -704,8 +783,13 @@ when the clustering changes, which also keeps them off the metric-toggle path.
   range, so a line began at the first sample *inside* it instead of crossing the
   boundary — a visible gap between the y-axis and the start of the data. The
   plot area is already clipped; pass every point and let the clip do the work.
-- The heatmap's y-axis was appended before its x-axis, so rotated node labels
-  scrolled left *over* the metric names instead of disappearing behind them.
+- The dashboard row was `<Col flex="auto">` for the reading column against a
+  pixel-sized heatmap column. Flex line-breaking uses the basis, not the shrunk
+  width, so the row wrapped and the embedding and heatmap landed below the fold.
+  Basis 0 plus `wrap={false}`; `min-width: 0` does not help here.
+- The heatmap's node axis was appended after its metric axis, so node labels
+  scrolled *over* the metric names instead of disappearing behind them. (Before
+  the map was rotated this was the same bug with the axes swapped.)
 - `TimelineView`'s x range subtracted `MARGIN.left` twice, and its cells were
   drawn a full bucket wide from the domain's last timestamp — so the strip ran
   past the right end of its own axis while leaving a gutter of dead space.

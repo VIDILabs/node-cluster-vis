@@ -8,6 +8,7 @@
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { toNaiveISO } from './utils/time.js';
+import { LIST_WIDTH } from './components/MetricSelect.js';
 
 const API = process.env.NCV_TEST_API;
 const maybe = API ? describe : describe.skip;
@@ -83,15 +84,32 @@ maybe('App against a live API', () => {
       expect(Math.max(...ys) - Math.min(...ys)).toBeGreaterThan(20);
     });
 
+    // The metric list caps itself at LIST_WIDTH, so its column is sized to the
+    // list rather than to a fraction of the reading column. As a fraction it
+    // grew with the panel, and the surplus showed as a band of empty space to
+    // the left of the charts.
+    const listCol = container
+      .querySelector('input[placeholder="Search metrics..."]')
+      .closest('.ant-col');
+    expect(listCol.style.flex).toMatch(/^0 0 \d+px$/);
+    const basis = Number(/(\d+)px/.exec(listCol.style.flex)[1]);
+    expect(basis).toBeGreaterThanOrEqual(LIST_WIDTH);
+    expect(basis).toBeLessThan(LIST_WIDTH + 40);
+
+    // The charts take the rest, and neither column may wrap onto its own line.
+    expect(listCol.nextElementSibling.style.flex).toMatch(/^1 1 0(px)?$/);
+    expect(listCol.parentElement.className).toContain('ant-row-no-wrap');
+
+    // Nodes run down the rows and metrics across the columns.
     const declaredNodes = Number(/Nodes:\s*(\d+)/.exec(container.textContent)[1]);
     const cells = Array.from(container.querySelectorAll('.heatmap-cell'));
-    const heatmapNodes = new Set(cells.map(c => c.getAttribute('x')));
+    const heatmapNodes = new Set(cells.map(c => c.getAttribute('y')));
     expect(heatmapNodes.size).toBe(declaredNodes);
 
-    // One row per selected metric. Metrics whose baseline computation threw were
-    // silently dropped from the heatmap, because the failure happened inside a
-    // thread pool whose results were never collected.
-    expect(new Set(cells.map(c => c.getAttribute('y'))).size).toBe(boxes.length);
+    // One column per selected metric. Metrics whose baseline computation threw
+    // were silently dropped from the heatmap, because the failure happened
+    // inside a thread pool whose results were never collected.
+    expect(new Set(cells.map(c => c.getAttribute('x'))).size).toBe(boxes.length);
 
     // The timeline draws a real in-baseline row rather than sitting empty, and
     // it discriminates: a single opacity across every cell would mean the band
@@ -339,23 +357,24 @@ maybe('App against a live API', () => {
 
     const boxes = () => Array.from(container.querySelectorAll('.ant-checkbox-input'));
     const charts = () => container.querySelectorAll('svg .lines').length;
-    const heatmapRows = () =>
+    // A metric is a heatmap *column* now, not a row.
+    const heatmapMetrics = () =>
       new Set(Array.from(container.querySelectorAll('.heatmap-cell'))
-        .map(c => c.getAttribute('y'))).size;
+        .map(c => c.getAttribute('x'))).size;
 
     const total = boxes().length;
     expect(charts()).toBe(total);
-    expect(heatmapRows()).toBe(total);
+    expect(heatmapMetrics()).toBe(total);
 
     // Off. Removing needs no network round trip — it is a local edit.
     fireEvent.click(boxes()[0]);
     await waitFor(() => expect(charts()).toBe(total - 1), { timeout: 30000 });
-    await waitFor(() => expect(heatmapRows()).toBe(total - 1), { timeout: 30000 });
+    await waitFor(() => expect(heatmapMetrics()).toBe(total - 1), { timeout: 30000 });
 
     // And back on: the series and the deviation scores are fetched together.
     fireEvent.click(boxes()[0]);
     await waitFor(() => expect(charts()).toBe(total), { timeout: 60000 });
-    await waitFor(() => expect(heatmapRows()).toBe(total), { timeout: 60000 });
+    await waitFor(() => expect(heatmapMetrics()).toBe(total), { timeout: 60000 });
 
     expect(screen.queryByText(/Could not load metric/i)).not.toBeInTheDocument();
   }, 180000);

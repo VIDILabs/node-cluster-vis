@@ -8,7 +8,7 @@
  * completely invisible. Opacity is now set outright on every draw.
  */
 import { render } from '@testing-library/react';
-import DRView from './DRPlot.js';
+import DRView, { MIN_SIDE, STACK_GAP } from './DRPlot.js';
 
 function makeData(count) {
   return Array.from({ length: count }, (_, i) => ({
@@ -91,6 +91,78 @@ describe('DRPlot', () => {
     // Whatever dims a point temporarily restores from this.
     Array.from(container.querySelectorAll('.dr-circle'))
       .forEach(c => expect(c.getAttribute('data-rest-opacity')).toBeTruthy());
+  });
+});
+
+describe('DRPlot layout', () => {
+  // jsdom does no layout, so the boxes the component measures are stubbed.
+  // Imported rather than restated: a local copy of MIN_SIDE or the stack gap
+  // goes stale the moment the design changes.
+  function stubLayout({ width, height, controls }) {
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', {
+      configurable: true,
+      get() { return this.classList?.contains('dr-stack') ? width : 0; },
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      get() { return this.classList?.contains('dr-stack') ? height : 0; },
+    });
+    Object.defineProperty(HTMLElement.prototype, 'offsetHeight', {
+      configurable: true,
+      // The controls are the div wrapping the parameter form.
+      get() { return this.firstElementChild?.id === 'form-container' ? controls : 0; },
+    });
+  }
+
+  afterEach(() => {
+    delete HTMLElement.prototype.clientWidth;
+    delete HTMLElement.prototype.clientHeight;
+    delete HTMLElement.prototype.offsetHeight;
+  });
+
+  const side = (container) =>
+    Number(container.querySelector('svg[id^="dr-chart-svg"]').getAttribute('width'));
+
+  test('the plot is sized from the stack minus the controls, not from its own slot', () => {
+    // Tall and narrow: the width binds, and the leftover height falls below the
+    // controls rather than opening a gap above them.
+    stubLayout({ width: 400, height: 900, controls: 260 });
+    expect(side(draw(makeData(20)).container)).toBe(400);
+
+    // Short: the controls' own height comes off the top of what the plot may
+    // take. Measuring the slot instead — which absorbed the card's slack — gave
+    // the plot the whole column and pushed the controls to the bottom of it.
+    stubLayout({ width: 400, height: 500, controls: 260 });
+    expect(side(draw(makeData(20)).container)).toBe(500 - 260 - STACK_GAP);
+
+    // Past the floor the card scrolls; the plot does not keep shrinking.
+    stubLayout({ width: 400, height: 300, controls: 260 });
+    expect(side(draw(makeData(20)).container)).toBe(MIN_SIDE);
+  });
+
+  test('the plot is square and the controls sit below it', () => {
+    const { container } = draw(makeData(20));
+
+    // E1 and E2 are two axes of one embedding with no units of their own, so a
+    // rectangular box stretches one of them and the distances the clustering is
+    // read from stop being comparable between the two directions.
+    const svg = container.querySelector('svg[id^="dr-chart-svg"]');
+    expect(svg.getAttribute('width')).toBe(svg.getAttribute('height'));
+    expect(svg.getAttribute('viewBox').split(' ').slice(2)).toEqual([
+      svg.getAttribute('width'), svg.getAttribute('height'),
+    ]);
+
+    // Stacked, not side by side: the form used to set the panel's width and the
+    // scatter got what was left, which is backwards.
+    const stack = container.querySelector('.dr-stack');
+    const slot = container.querySelector('.dr-plot-slot');
+    expect(stack).toBeTruthy();
+    expect(slot.parentElement).toBe(stack);
+    const children = Array.from(stack.children);
+    expect(children.indexOf(slot)).toBe(0);
+    // The controls are the rest of the stack, under the plot.
+    expect(children.length).toBeGreaterThan(1);
+    expect(children[1].querySelector('#form-container')).toBeTruthy();
   });
 });
 

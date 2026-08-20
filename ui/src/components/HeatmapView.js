@@ -6,24 +6,69 @@ import { lineClass, nodeClass, pointId } from '../utils/nodes.js';
 import { CHART_FONT, OPACITY } from '../config.js';
 import Tooltip from '../utils/tooltip.js';
 
-// Fixed axis gutters; these were state that was never set. The left gutter has
-// to hold a metric name at CHART_FONT.label.
-export const MARGIN = { top: 0, right: 50, bottom: 110, left: 140 };
+// Nodes run down the rows and metrics across the top. The node axis is the long
+// one — hundreds of nodes against a dozen metrics — and a column of names reads
+// straight off, where the same list across the bottom had to be rotated 65
+// degrees and read at an angle. Rotating the map also puts its long axis along
+// the page's long axis, which is what lets the panel be narrow.
+//
+// Fixed axis gutters. The top has to hold a rotated metric name at
+// CHART_FONT.label; the left, a node id at CHART_FONT.axis.
+//
+// The top is arithmetic, not a guess, and it has to be re-checked if either the
+// type size or METRIC_LABEL_ANGLE moves. A label's vertical reach is its length
+// times sin(angle), plus the 9px the axis holds it off its own line and about
+// 8px of dx/dy nudge. `Missed Buffers_P1` — the longest name in the bundled
+// sample — is roughly 115px at 14px sans, so 115 * sin(55) + 17 comes to 111.
+// A name much longer than that is clipped by the top of the overlay rather
+// than pushing the map down, which is the right trade at a dozen metrics.
+export const MARGIN = { top: 120, right: 20, bottom: 0, left: 100 };
 // A cell is the same size whatever the node count. Sizing it to fit the panel
 // meant the cells you were shown depended on how many clusters happened to be
 // visible — readable with one cluster on, slivers with four — so the same
 // z-score looked different from one moment to the next. The rows scroll
-// horizontally instead; the panel is what gives, not the encoding.
+// vertically instead; the panel is what gives, not the encoding.
 export const CELL = { width: 20, height: 20 };
-// Below this a rotated node label can't be read, so labels are thinned instead.
-// Rotated -65deg, adjacent labels need about type-height / sin(65deg) of
-// horizontal room, so this tracks CHART_FONT.axis rather than being guessed.
-const LABEL_MIN_WIDTH = Math.ceil(CHART_FONT.axis / Math.sin((65 * Math.PI) / 180));
-// Ceiling on the rows area before it starts scrolling instead of growing.
+// Metric names are rotated so they can sit above 20px-wide columns. At this
+// angle adjacent labels need about type-height / sin(angle) of horizontal room:
+// 55 degrees leaves real clearance at CHART_FONT.label where 45 would leave
+// none. Below that width labels are thinned rather than left to overprint.
+const METRIC_LABEL_ANGLE = 55;
+const LABEL_MIN_WIDTH = Math.ceil(CHART_FONT.label / Math.sin((METRIC_LABEL_ANGLE * Math.PI) / 180));
+// Node labels are horizontal now, so what they need is vertical room: one line
+// of type plus a hair of leading. CELL.height clears it, so nothing is thinned
+// in practice — the guard is here so a smaller cell degrades legibly.
+const LABEL_MIN_HEIGHT = CHART_FONT.axis + 2;
+// Fallback ceiling on the rows area, used before the panel has been measured
+// and in jsdom, which does no layout. In the browser the rows take the card's
+// slack and scroll past it.
 export const MAX_ROWS_HEIGHT = 360;
 
-// Column order. Cluster order groups a k-means cluster into one contiguous
-// block, which is what makes a whole-cluster excursion visible as a band.
+// The card's own chrome around the map: 12px of body padding each side at
+// size="small", plus a 1px border each side, plus 4px of slack. The slack is
+// deliberate — being a couple of pixels short would put a horizontal scrollbar
+// under a map that visibly fits, which is far worse than a hairline of gutter.
+export const CARD_CHROME = 30;
+// Floor, so the card's own title and sort control stay legible. A three-metric
+// selection would otherwise ask for a panel narrower than its own header.
+export const MIN_PANEL_WIDTH = 260;
+
+/**
+ * The width this panel actually needs, in pixels.
+ *
+ * The map is a fixed 20px per metric plus two gutters, so unlike every other
+ * panel it has an exact natural width and no use for anything beyond it — a
+ * dozen columns is a dozen columns however many nodes there are. App sizes the
+ * column from this rather than from a 24ths span, and gives what is left to the
+ * reading column.
+ */
+export const panelWidth = (featureCount) => Math.max(
+    MARGIN.left + featureCount * CELL.width + MARGIN.right + CARD_CHROME,
+    MIN_PANEL_WIDTH
+);
+
+// Row order. Cluster order groups a k-means cluster into one contiguous block,
+// which is what makes a whole-cluster excursion visible as a band.
 const SORT_OPTIONS = [
     { label: 'ID', value: 'name' },
     { label: 'Cluster', value: 'cluster' },
@@ -50,14 +95,15 @@ const HeatmapView = ({ data, nodeClusterMap, selectedPoints, hiddenClusters }) =
 
     const drawHeatmap = useCallback((matrix, featureNames, nodeIds) => {
         const containerNode = heatmapRef.current;
-        const visibleHeight = containerNode ? containerNode.clientHeight : 400;
+        const visibleHeight = containerNode?.clientHeight || (MAX_ROWS_HEIGHT + MARGIN.top);
         const cellWidth = CELL.width;
         const cellHeight = CELL.height;
-        const mapWidth = nodeIds.length * cellWidth;
-        const mapHeight = featureNames.length * cellHeight;
+        // Metrics across, nodes down.
+        const mapWidth = featureNames.length * cellWidth;
+        const mapHeight = nodeIds.length * cellHeight;
 
-        const yScale = d3.scaleBand().domain(featureNames).range([0, mapHeight]).padding(0.05);
-        const xScale = d3.scaleBand().domain(nodeIds).range([0, mapWidth]).padding(0.05);
+        const xScale = d3.scaleBand().domain(featureNames).range([0, mapWidth]).padding(0.05);
+        const yScale = d3.scaleBand().domain(nodeIds).range([0, mapHeight]).padding(0.05);
         const myColor = zScoreColor;
 
         const container = d3.select(heatmapRef.current);
@@ -93,70 +139,92 @@ const HeatmapView = ({ data, nodeClusterMap, selectedPoints, hiddenClusters }) =
                 .style("pointer-events", "none")
                 .style("z-index", 10);
 
-            // Document order is paint order, and the y-axis has to win it.
-            // Node labels are rotated, so each one's tail runs left of the
-            // column it belongs to, and scrolling the columns right slides more
-            // of them into the metric-name gutter. Painting the x-axis first
-            // means the y gutter's white ground — and then the metric names —
-            // cover that tail: labels slide behind the axis instead of
-            // overprinting it.
-            axisSvg.append("rect").attr("id", "x-axis-bg").style("fill", "white");
-            axisSvg.append("g").attr("class", "x-axis");
-
+            // Document order is paint order, and with the map rotated it is the
+            // *x*-axis that has to win it. The node labels are the ones that
+            // move: they scroll vertically with the rows, so scrolling down
+            // slides them up into the metric-name gutter. The outer SVG clips
+            // anything above its own top edge, but between there and
+            // MARGIN.top there is nothing to hide them — so the metric axis is
+            // appended last and its white ground, then the names, paint over
+            // them. Its background spans the full width, including the node
+            // gutter, because that is where the collision happens; no metric
+            // label reaches back into it, so covering it costs nothing.
             axisSvg.append("rect").attr("id", "y-axis-bg").style("fill", "white");
             axisSvg.append("g").attr("class", "y-axis");
+
+            axisSvg.append("rect").attr("id", "x-axis-bg").style("fill", "white");
+            axisSvg.append("g").attr("class", "x-axis");
         }
 
-        // Tether the x-axis to the bottom of the rows, not to the bottom of the
-        // container. Pinning it to the container left a gap the height of the
-        // unused space whenever the metric list was shorter than the panel —
-        // which, with everything selected by default, is the normal case. The
-        // rows only start scrolling once they genuinely outgrow the panel.
+        // The rows area takes whatever the panel has left under the metric
+        // axis, and only scrolls once the nodes genuinely outgrow it. Sizing it
+        // to the full container instead left a gap the height of the unused
+        // space whenever there were fewer nodes than the panel could hold.
         const availableHeight = Math.max(visibleHeight - MARGIN.top - MARGIN.bottom, cellHeight);
         const contentHeight = Math.min(mapHeight, availableHeight);
-        const stickyXPosition = MARGIN.top + contentHeight;
+        const availableWidth = Math.max(
+            (containerNode?.clientWidth || mapWidth + MARGIN.left + MARGIN.right) - MARGIN.left - MARGIN.right,
+            cellWidth
+        );
 
         const scrollDiv = container.select("#heatmap-scroll")
             .style("height", `${contentHeight}px`)
-            .style("overflow-y", mapHeight > contentHeight ? "auto" : "hidden");
+            .style("overflow-y", mapHeight > contentHeight ? "auto" : "hidden")
+            .style("overflow-x", mapWidth > availableWidth ? "auto" : "hidden");
 
         const svg = container.select("#heatmap-svg")
             .attr("width", mapWidth)
             .attr("height", mapHeight);
 
         const axisSvg = container.select("#axis-svg")
-            .attr("width", containerNode.clientWidth)
+            .attr("width", containerNode?.clientWidth || 0)
             .attr("height", visibleHeight);
 
-        axisSvg.select("#y-axis-bg").attr("width", MARGIN.left).attr("height", visibleHeight);
-        
+        // The node gutter runs the height of the rows; the metric gutter runs
+        // the full width, over the top of it, for the reason given above.
+        axisSvg.select("#y-axis-bg")
+            .attr("x", 0)
+            .attr("y", MARGIN.top)
+            .attr("width", MARGIN.left)
+            .attr("height", contentHeight);
+
         axisSvg.select("#x-axis-bg")
-            .attr("x", MARGIN.left)
-            .attr("y", stickyXPosition) 
-            .attr("width", containerNode.clientWidth - MARGIN.left)
-            .attr("height", MARGIN.bottom);
+            .attr("x", 0)
+            .attr("y", 0)
+            .attr("width", containerNode?.clientWidth || 0)
+            .attr("height", MARGIN.top);
+
+        // Thin the node labels if a cell ever gets shorter than a line of type.
+        // At CELL.height this is a stride of 1, so every node keeps its name.
+        const nodeStride = Math.max(Math.ceil(LABEL_MIN_HEIGHT / cellHeight), 1);
+        const yAxis = d3.axisLeft(yScale)
+            .tickValues(nodeIds.filter((_, i) => i % nodeStride === 0));
 
         container.select(".y-axis")
-            .call(d3.axisLeft(yScale))
+            .call(yAxis)
             .selectAll("text")
-            .style("font-size", `${CHART_FONT.label}px`);
-
-        // Thin the tick labels once cells are too narrow to carry one each,
-        // rather than letting a hundred rotated labels overprint each other.
-        const labelStride = Math.max(Math.ceil(LABEL_MIN_WIDTH / cellWidth), 1);
-        const xAxis = d3.axisBottom(xScale)
-            .tickValues(nodeIds.filter((_, i) => i % labelStride === 0));
-
-        container.select(".x-axis")
-            .call(xAxis)
-            .selectAll("text")
-            .attr("transform", "rotate(-65)")
-            .attr("dx", "-.8em").attr("dy", ".15em")
-            .style("text-anchor", "end")
             .style("fill", d => colorScale(nodeClusterMap.get(d)))
             .style("opacity", d => cellOpacity(d))
             .style("font-size", `${CHART_FONT.axis}px`)
             .style("font-weight", "bold");
+
+        // Same guard on the metric axis, against a narrow cell rather than a
+        // short one — rotated labels need horizontal room proportional to their
+        // type size.
+        const metricStride = Math.max(Math.ceil(LABEL_MIN_WIDTH / cellWidth), 1);
+        const xAxis = d3.axisTop(xScale)
+            .tickValues(featureNames.filter((_, i) => i % metricStride === 0));
+
+        container.select(".x-axis")
+            .call(xAxis)
+            .selectAll("text")
+            // Anchored at the start and rotated up: the name rises to the right
+            // of the column it belongs to, so it never reaches back over the
+            // node gutter.
+            .attr("transform", `rotate(-${METRIC_LABEL_ANGLE})`)
+            .attr("dx", ".6em").attr("dy", "-.2em")
+            .style("text-anchor", "start")
+            .style("font-size", `${CHART_FONT.label}px`);
 
         function syncAxesToScroll() {
             const node = scrollDiv.node();
@@ -167,7 +235,7 @@ const HeatmapView = ({ data, nodeClusterMap, selectedPoints, hiddenClusters }) =
                 .attr("transform", `translate(${MARGIN.left}, ${MARGIN.top - scrollTop})`);
 
             container.select(".x-axis")
-                .attr("transform", `translate(${MARGIN.left - scrollLeft}, ${stickyXPosition})`);
+                .attr("transform", `translate(${MARGIN.left - scrollLeft}, ${MARGIN.top})`);
         }
 
         scrollDiv.on("scroll", syncAxesToScroll);
@@ -181,8 +249,8 @@ const HeatmapView = ({ data, nodeClusterMap, selectedPoints, hiddenClusters }) =
             .append("rect")
             .attr("class", d => `heatmap-cell ${nodeClass(d.nodeId)}`)
             .merge(cells)
-            .attr("x", d => xScale(d.nodeId))
-            .attr("y", d => yScale(d.feature))
+            .attr("x", d => xScale(d.feature))
+            .attr("y", d => yScale(d.nodeId))
             .attr("width", xScale.bandwidth())
             .attr("height", yScale.bandwidth())
             .attr("rx", 4).attr("ry", 4)
@@ -301,10 +369,10 @@ const HeatmapView = ({ data, nodeClusterMap, selectedPoints, hiddenClusters }) =
         // parseInt-after-last-hyphen rule produced NaN for anything else. Under
         // 'cluster' the same collation breaks ties inside each cluster, so the
         // order is still stable and predictable.
-        // Hiding a cluster drops its columns outright rather than dimming them.
+        // Hiding a cluster drops its rows outright rather than dimming them.
         // Unlike a lasso selection — which is drawn, not filtered, so the
         // selection keeps its context — this is an explicit request for the
-        // space back, and the remaining cells widen to use it.
+        // space back, and the remaining rows close up to use it.
         const shown = data.filter(d => !hiddenClusters?.has(nodeClusterMap.get(d.nodeId)));
 
         const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
@@ -321,12 +389,12 @@ const HeatmapView = ({ data, nodeClusterMap, selectedPoints, hiddenClusters }) =
             return collator.compare(a, b);
         });
 
-        // Rows come from the full data, so hiding every cluster empties the
-        // columns without also collapsing the metric list.
+        // Columns come from the full data, so hiding every cluster empties the
+        // rows without also collapsing the metric list off the top axis.
         const features = Object.keys(data[0]).filter(key => key !== "nodeId");
         const matrix = [];
-        features.forEach((feature, rowIndex) => {
-            shown.forEach((d, colIndex) => {
+        shown.forEach((d, rowIndex) => {
+            features.forEach((feature, colIndex) => {
                 matrix.push({
                     feature,
                     nodeId: d.nodeId,
@@ -340,18 +408,21 @@ const HeatmapView = ({ data, nodeClusterMap, selectedPoints, hiddenClusters }) =
     }, [data, nodeClusterMap, drawHeatmap, resizeTick, sortBy, hiddenClusters]);
 
 
-    // Size the panel to the rows it has, up to a cap. Below the cap the x-axis
-    // sits directly under the last row; above it the rows scroll and the axis
-    // stays pinned at the cap. A fixed panel height left a gap the size of the
-    // unused space between the last metric and the axis.
-    const featureCount = data?.length ? Object.keys(data[0]).filter(k => k !== 'nodeId').length : 0;
-    const rowsHeight = Math.min(featureCount * CELL.height, MAX_ROWS_HEIGHT);
+    // Rows are nodes, so the map is tall rather than wide and there are far more
+    // rows than a panel can hold. It takes the card's slack and scrolls past it;
+    // this is only the floor — enough for the nodes it has, up to the cap — so a
+    // short viewport still shows a usable strip rather than a sliver.
+    const nodeCount = data?.length ?? 0;
+    const minRowsHeight = Math.min(nodeCount * CELL.height, MAX_ROWS_HEIGHT);
 
 return (
     <Card
         title="NODE BEHAVIOR VIEW"
         size="small"
-        style={{ height: 'auto', width: '100%' }}
+        // Takes the slack in its column, the same way the DR card does in
+        // its own, so the three columns end level at any viewport height.
+        className="panel-fill"
+        style={{ width: '100%' }}
         extra={
             // Ordering only. Cluster visibility is set once, in the Node
             // Similarity panel, and every view honours it from there.
@@ -363,17 +434,20 @@ return (
             />
         }
     >
-        <div style={{ display:'flex', position:'relative' }}>
-            <div ref={heatmapRef} style={{
-                    width: "100%",
-                    height: `${rowsHeight + MARGIN.bottom}px`,
-                    overflow: "hidden",
-                    position: "relative"
-                }}
-            />
-        </div>
+        <div ref={heatmapRef} style={{
+                width: "100%",
+                // Flex, not a percentage: an auto-height parent anywhere in a
+                // percentage chain resolves the whole thing to zero. The
+                // min-height is the floor described above, and what the
+                // component measures itself against before layout runs.
+                flex: "1 1 auto",
+                minHeight: `${minRowsHeight + MARGIN.top}px`,
+                overflow: "hidden",
+                position: "relative"
+            }}
+        />
 
-        <div ref={legendRef} style={{ overflow:'hidden' }}  />
+        <div ref={legendRef} style={{ overflow:'hidden', flexShrink: 0 }}  />
         <Tooltip
             visible={tooltip.visible}
             content={tooltip.content}

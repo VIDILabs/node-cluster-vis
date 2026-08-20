@@ -7,6 +7,11 @@ import { colorScale, COLORS } from '../utils/colors.js';
 import { CHART_FONT } from '../config.js';
 import { toNaiveISO } from '../utils/time.js';
 
+// Room for the scroller's own scrollbar. The baseline boxes are the rightmost
+// thing in this panel, so without it an overlay scrollbar — one that takes no
+// layout width — prints straight over the End and Max fields.
+const SCROLLBAR_GUTTER = 14;
+
 const MetricView = ({ data, timeRange, selectedDims, selectedPoints, zScores, setzScores, setBaselines, baselines, baselinesRef, onBaselineChange, onError, scopeRef, nodeClusterMap, headerMap, hiddenClusters }) => {
     const chartsRef = useRef([]);
     const selectedTimeRange = timeRange;
@@ -227,14 +232,26 @@ const MetricView = ({ data, timeRange, selectedDims, selectedPoints, zScores, se
     // chain that fails to resolve scrolls rather than running the charts off the
     // bottom of the page.
     return (
-      <div style={{ overflow: 'auto', height: '100%', maxHeight: 'calc(100vh - 190px)', minHeight: 0 }}>
+      <div style={{
+        overflow: 'auto',
+        height: '100%',
+        maxHeight: 'calc(100vh - 190px)',
+        minHeight: 0,
+        // Everything in here — the charts, the baseline boxes, the legend —
+        // ends flush with this edge, which is where the scrollbar sits. The
+        // padding keeps the boxes clear of an overlay scrollbar, which takes no
+        // layout width and so simply prints over whatever is under it;
+        // `scrollbar-gutter` reserves the space up front for a classic one, so
+        // the charts don't reflow the moment the list grows past the panel.
+        paddingRight: `${SCROLLBAR_GUTTER}px`,
+        scrollbarGutter: 'stable',
+      }}>
         <div style={{ 
           display: 'flex', 
           alignItems: 'center', 
           flexWrap: 'wrap',
           justifyContent: 'flex-end', 
-          marginBottom: '8px', 
-          marginRight: '10px',
+          marginBottom: '8px',
           position: 'sticky',
           top: 0,
           zIndex: 10,

@@ -4,9 +4,9 @@ import './App.css';
 import api from './api.js';
 import { COVERAGE_BINS, DEFAULT_WINDOW_MINUTES, FALLBACK_DEFAULTS, STREAM_INTERVAL_MS } from './config.js';
 import DRView from './components/DRPlot.js';
-import MetricSelect from "./components/MetricSelect.js";
+import MetricSelect, { LIST_WIDTH as METRIC_LIST_WIDTH } from "./components/MetricSelect.js";
 import MetricView from './components/MetricView.js';
-import HeatmapView from './components/HeatmapView.js';
+import HeatmapView, { panelWidth as heatmapPanelWidth } from './components/HeatmapView.js';
 import TimelineView from './components/TimelineView.js';
 import { toNaiveISO } from './utils/time.js';
 
@@ -34,6 +34,10 @@ const Placeholder = ({ height, message }) => (
     <Typography.Text type="secondary">{message}</Typography.Text>
   </Card>
 );
+
+// The Metric Reading row's gutter. Named because the metric-list column's width
+// is LIST_WIDTH plus this, and the two have to agree or the list is clipped.
+const METRIC_GUTTER = 16;
 
 function App() {
   const [datasets, setDatasets] = useState([]);
@@ -550,6 +554,16 @@ function App() {
   const hasSeries = Boolean(metricData && baselines && zScores && Object.keys(headerMap).length);
   const hasDr = Boolean(DRTData && FCs);
 
+  // The deviation panel is exactly as wide as its map: one 20px column per
+  // metric plus the two gutters. Everything else goes to the reading column.
+  // Derived from the z-scores rather than from `selectedDims` because a metric
+  // whose baseline could not be computed has no column in the map, and a panel
+  // sized for a column that isn't drawn leaves a strip of dead space.
+  const heatmapWidth = useMemo(
+    () => heatmapPanelWidth(zScores?.length ? Object.keys(zScores[0]).length - 1 : 0),
+    [zScores]
+  );
+
   return (
     <Layout style={{ height: "100vh", padding: "5px" }}>
       <Header style={{ background: "#fff", padding: "0 10px", marginBottom: "2px" }}>
@@ -654,8 +668,27 @@ function App() {
 
       <Content style={{ marginTop: "5px" }}>
         <Spin spinning={loadingDataset} tip="Loading dataset…">
-          <Row gutter={[8, 8]}>
-            <Col span={14} className="dashboard-column">
+          {/* Three columns, left to right: the time-and-series reading on the
+              left, then the embedding, then the per-node deviations.
+
+              The heatmap column is sized in pixels, not 24ths: its map is a
+              fixed 20px per metric plus two gutters, so it has an exact natural
+              width and nothing to spend anything beyond it on. The reading
+              column takes whatever that leaves.
+
+              `wrap={false}` and a flex-basis of 0 on that column are both
+              load-bearing. A row of columns wraps on the items' *hypothetical*
+              sizes — their flex-basis — before any shrinking is considered, and
+              `flex="auto"` means `flex: 1 1 auto`, whose basis is the column's
+              content width. `min-width: 0` does not reduce a content basis, so
+              the reading column measured wider than the space left and the
+              other two dropped onto a second line. A basis of 0 asks for
+              nothing and grows into the leftover; nowrap says outright that
+              these are three columns, not a grid. The min-width is the floor at
+              which the row overflows sideways instead of squeezing the charts
+              into nothing — visible and recoverable, unlike a silent collapse. */}
+          <Row gutter={[8, 8]} wrap={false}>
+            <Col flex="1 1 0" style={{ minWidth: 320 }} className="dashboard-column">
               {hasDr && coverage?.clusters?.length ? (
                 <TimelineView
                   windowStart={timeRange[0]}
@@ -671,8 +704,18 @@ function App() {
 
               {hasSeries ? (
                 <Card title="METRIC READING VIEW" size="small" className="panel-fill">
-                  <Row gutter={[16, 16]}>
-                    <Col span={6} style={{ height: "100%", minHeight: 0 }}>
+                  {/* Same shape as the dashboard row above, for the same
+                      reason. MetricSelect caps itself at LIST_WIDTH, so a
+                      fractional span gave it whatever 7/24 happened to be —
+                      which, once the reading column grew to take the dashboard's
+                      leftover, was ~100px more than the list can use. That
+                      surplus showed as a band of empty space to the left of the
+                      charts. Sized to the list, the charts get it back. */}
+                  <Row gutter={[METRIC_GUTTER, METRIC_GUTTER]} wrap={false}>
+                    <Col
+                      flex={`0 0 ${METRIC_LIST_WIDTH + METRIC_GUTTER}px`}
+                      style={{ height: "100%", minHeight: 0 }}
+                    >
                       <MetricSelect
                         selectedDims={selectedDims}
                         headerMap={headerMap}
@@ -683,7 +726,7 @@ function App() {
                         hiddenClusters={hiddenClusters}
                       />
                     </Col>
-                    <Col span={18} style={{ height: "100%", minHeight: 0 }}>
+                    <Col flex="1 1 0" style={{ height: "100%", minHeight: 0, minWidth: 0 }}>
                       <MetricView
                         data={metricData}
                         timeRange={timeRange}
@@ -711,7 +754,7 @@ function App() {
               )}
             </Col>
 
-            <Col span={10} className="dashboard-column">
+            <Col span={6} className="dashboard-column">
               {hasDr ? (
                 <DRView
                   data={DRTData}
@@ -734,7 +777,9 @@ function App() {
               ) : (
                 <Placeholder height="40vh" message="No embedding yet" />
               )}
+            </Col>
 
+            <Col flex={`0 0 ${heatmapWidth}px`} className="dashboard-column">
               {zScores?.length ? (
                 <HeatmapView
                   data={zScores}

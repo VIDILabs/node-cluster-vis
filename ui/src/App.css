@@ -183,3 +183,30 @@
   flex: 1 1 auto;
   min-height: 0;
 }
+
+/* --- Node Similarity panel -------------------------------------------------
+   Plot above, configuration below. The stack fills the card body; the slot
+   takes the slack and the form keeps its own height, which is what gives the
+   square plot a definite box to be fitted into.
+
+   The plot is measured against the *stack*, never against its own slot: the
+   slot is sized to the plot, so measuring it would be measuring our own output
+   and the two would ratchet each other larger on every pass. `gap` here is
+   mirrored by STACK_GAP in DRPlot.js, which subtracts it from the space the
+   plot is allowed. */
+.dr-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  height: 100%;
+  min-height: 0;
+}
+
+.dr-plot-slot {
+  /* Sizes to the plot, so the controls sit directly under it. Absorbing the
+     column's slack here instead parked them at the bottom of the card with a
+     band of dead space above them. The slack falls below the controls now. */
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: center;
+}

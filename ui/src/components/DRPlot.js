@@ -1,4 +1,4 @@
-import { Card, Col, Form, Row, Select, Button, InputNumber } from "antd";
+import { Card, Form, Select, Button, InputNumber } from "antd";
 import * as d3 from 'd3';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { colorScale } from '../utils/colors.js';
@@ -14,20 +14,38 @@ const { Option } = Select;
 // handler has to restore exactly the resting value; a mismatch made every
 // hovered point grow permanently.
 const POINT_RADIUS = 4;
+
+// Both parameter headings, so they cannot drift apart from each other.
+const SECTION_HEADING = { margin: 0, fontWeight: 'bold', textAlign: 'right' };
 const POINT_RADIUS_HOVER = 8;
 
 // Fallback plot geometry, used before the container has been measured and in
 // jsdom, which does no layout. The real box comes from the panel: the card
 // stretches to fill its column, and the scatter is drawn at that size 1:1 so
 // the embedding uses the space instead of being letterboxed inside it.
+//
+// The plot is square. E1 and E2 are two axes of one embedding with no units of
+// their own, so a rectangular box stretches one of them and the distances the
+// clustering is read from stop being comparable between the two directions.
+// The side is the smaller of the slot's width and height, which is what keeps
+// it square in a narrow column without running past the bottom of the card.
 const SIZE = { width: 300, height: 300 };
-const MIN_SIZE = { width: 220, height: 240 };
+export const MIN_SIDE = 220;
+// Must match `gap` on .dr-stack in App.css: the plot's side is worked out from
+// the space left over after the controls, and that space includes the gap.
+export const STACK_GAP = 8;
 const MARGIN = { top: 10, right: 20, bottom: 20, left: 20 };
 const OPACITY_SELECTED = 1;
 const OPACITY_MUTED = 0.4;
 
 const DRView = ({ data, type, selectedPoints, nodeClusterMap, handleRecompute, updateSelectedNodes, nNeighbors, minDist, numClusters, clusters, hiddenClusters, onToggleCluster }) => {
     const svgContainerRef = useRef();
+    // What the plot is measured against. Deliberately *not* the plot's own
+    // slot: the slot is sized to the plot, so observing it would be measuring
+    // our own output. The stack's height comes from the card, and the controls
+    // keep whatever height they need; the plot gets what is left.
+    const stackRef = useRef();
+    const controlsRef = useRef();
     const [size, setSize] = useState(SIZE);
     const [localNNeighbors, setLocalNNeighbors] = useState(nNeighbors);
     const [localMinDist, setLocalMinDist] = useState(minDist);
@@ -63,17 +81,27 @@ const DRView = ({ data, type, selectedPoints, nodeClusterMap, handleRecompute, u
     // Track the panel the card gives us. Returning the previous object when
     // nothing changed keeps a ResizeObserver callback from re-rendering forever.
     useEffect(() => {
-        const node = svgContainerRef.current;
-        if (!node) return undefined;
+        const stack = stackRef.current;
+        if (!stack) return undefined;
         const measure = () => setSize((prev) => {
-            const width = Math.max(node.clientWidth || SIZE.width, MIN_SIZE.width);
-            const height = Math.max(node.clientHeight || SIZE.height, MIN_SIZE.height);
-            return prev.width === width && prev.height === height ? prev : { width, height };
+            const width = stack.clientWidth || SIZE.width;
+            // The controls are laid out first and keep their height; the plot
+            // takes the largest square that fits in what remains. Below the
+            // floor the card scrolls rather than the plot collapsing.
+            const available = stack.clientHeight
+                ? stack.clientHeight - (controlsRef.current?.offsetHeight || 0) - STACK_GAP
+                : SIZE.height;
+            const side = Math.max(Math.min(width, available), MIN_SIDE);
+            return prev.width === side && prev.height === side ? prev : { width: side, height: side };
         });
         measure();
         if (typeof ResizeObserver === 'undefined') return undefined;
+        // Both: the stack changes with the viewport, the controls with the
+        // cluster count — ClusterToggles gains a button per cluster, and a k of
+        // 9 wraps onto a second line.
         const observer = new ResizeObserver(measure);
-        observer.observe(node);
+        observer.observe(stack);
+        if (controlsRef.current) observer.observe(controlsRef.current);
         return () => observer.disconnect();
     }, []);
 
@@ -287,25 +315,32 @@ const DRView = ({ data, type, selectedPoints, nodeClusterMap, handleRecompute, u
                 // level with the left-hand one at any viewport height.
                 className="panel-fill"
             >
-            <Row gutter={12}>
-                {/* Scatterplot */}
-                <Col span={16} style={{ height: '100%', minHeight: 0 }}>
+            {/* Plot above, configuration below. Side by side, the form set the
+                panel's width and the scatter got whatever was left, which is
+                backwards: the embedding is the reason the panel exists. Stacked,
+                the panel can be as narrow as the plot wants to be. */}
+            <div ref={stackRef} className="dr-stack">
+                {/* The slot sizes to the plot rather than absorbing the card's
+                    slack — otherwise the controls are pushed to the bottom of
+                    the card with a gap between them and the plot they belong
+                    to. Any leftover height falls below the controls instead. */}
+                <div className="dr-plot-slot">
                     <div
                         ref={svgContainerRef}
-                        // The min-height is what guarantees the plot is on
-                        // screen at all; height:100% only decides how much of
-                        // the column's slack it takes beyond that.
-                        style={{ height: '100%', minHeight: `${MIN_SIZE.height}px` }}
+                        // Sized in pixels from the measurement above, never in
+                        // percent: an SVG at height:100% inside an auto-height
+                        // div computes to zero.
+                        style={{ width: `${size.width}px`, height: `${size.height}px` }}
                     ></div>
                     <LassoSelection
                         svgRef={svgContainerRef}
                         targetItems={'.dr-circle'}
                         onSelect={handleSelection}
                     />
-                </Col>
+                </div>
 
-                {/* Config forms stacked vertically */}
-                <Col span={7} style={{ alignSelf: 'flex-start' }}>
+                {/* Config forms, directly below the plot */}
+                <div ref={controlsRef} style={{ flexShrink: 0 }}>
                     <div
                         id="form-container"
                         style={{
@@ -317,7 +352,12 @@ const DRView = ({ data, type, selectedPoints, nodeClusterMap, handleRecompute, u
                         >
                         {/* UMAP Parameters */}
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                            <p style={{ margin: 0, fontWeight: 'bold' }}>UMAP Parameters:</p>
+                            {/* Right-aligned, so each heading sits over the
+                                column of inputs it introduces rather than over
+                                the labels. labelCol + wrapperCol sum to 24
+                                below, which is what puts the inputs in a column
+                                flush with the form's right edge. */}
+                            <p style={SECTION_HEADING}>UMAP Parameters:</p>
                             <Form
                                 layout="horizontal"
                                 colon={false}
@@ -325,7 +365,7 @@ const DRView = ({ data, type, selectedPoints, nodeClusterMap, handleRecompute, u
                             >
                             <Form.Item
                                 label="n_neighbors"
-                                labelCol={{ span: 16 }}
+                                labelCol={{ span: 14 }}
                                 wrapperCol={{ span: 10 }}
                                 style={{ marginBottom: '4px' }}
                             >
@@ -341,7 +381,7 @@ const DRView = ({ data, type, selectedPoints, nodeClusterMap, handleRecompute, u
 
                             <Form.Item
                                 label="min_dist"
-                                labelCol={{ span: 16 }}
+                                labelCol={{ span: 14 }}
                                 wrapperCol={{ span: 10 }}
                                 style={{ marginBottom: '4px' }}
                             >
@@ -355,14 +395,14 @@ const DRView = ({ data, type, selectedPoints, nodeClusterMap, handleRecompute, u
                                 />
                             </Form.Item>
                             {/* K-Means */}
-                            <p style={{ margin: 0, fontWeight: 'bold' }}>K-Means:</p>
+                            <p style={SECTION_HEADING}>K-Means:</p>
                             {/* Not bound to the Form by name: antd would then own the
                                 value and ignore the controlled `value` below, which
                                 left the dropdown stale after a reset. */}
                             <Form.Item
                                 label="Num clusters"
-                                labelCol={{ span: 15 }}
-                                wrapperCol={{ span: 14 }}
+                                labelCol={{ span: 14 }}
+                                wrapperCol={{ span: 10 }}
                                 style={{ marginBottom: 0 }}
                             >
                                 <Select
@@ -382,7 +422,10 @@ const DRView = ({ data, type, selectedPoints, nodeClusterMap, handleRecompute, u
                         <div
                             style={{
                                 display: "flex",
-                                flexDirection: "column", // stack vertically
+                                // Side by side: below the plot these span the
+                                // whole panel, and two full-width buttons read
+                                // as two unrelated actions.
+                                flexDirection: "row",
                                 gap: "6px",
                                 marginTop: "8px",
                                 alignItems: "stretch",
@@ -390,6 +433,7 @@ const DRView = ({ data, type, selectedPoints, nodeClusterMap, handleRecompute, u
                             >
                             <Button
                                 size="small"
+                                style={{ flex: 1 }}
                                 onClick={() =>
                                     handleRecompute(localNumClusters, localNNeighbors, localMinDist, true, false)
                                 }
@@ -399,6 +443,7 @@ const DRView = ({ data, type, selectedPoints, nodeClusterMap, handleRecompute, u
                             </Button>
                             <Button
                                 size="small"
+                                style={{ flex: 1 }}
                                 onClick={() => {
                                     // The parent owns the dataset's defaults; ask it to
                                     // restore them and mirror whatever it settles on
@@ -421,8 +466,8 @@ const DRView = ({ data, type, selectedPoints, nodeClusterMap, handleRecompute, u
                             label="Show clusters:"
                         />
                     </div>
-                </Col>
-            </Row>
+                </div>
+            </div>
         </Card>
 
         <Tooltip
