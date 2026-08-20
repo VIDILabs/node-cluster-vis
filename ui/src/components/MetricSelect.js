@@ -1,11 +1,20 @@
 import { Checkbox, List, Input, Tooltip } from "antd";
 import { SearchOutlined } from "@ant-design/icons";
-import React, { useState, useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import FeatureContributionBarGraph from "./FeatureContributionBarGraph";
 import { colorScale } from '../utils/colors.js';
+import { byContribution, contributionsFor } from '../utils/contributions.js';
+
+const SPARK_WIDTH = 60;
+const SPARK_HEIGHT = 20;
+// The search box and the list are one control, so one width governs both — the
+// box used to fill the column while the list stopped at 300, which read as two
+// unrelated things stacked. Narrow, because this is a list of names: the width
+// the charts get back is worth more than a wider ellipsis threshold.
+export const LIST_WIDTH = 220;
 
 function smoothSeries(series, windowSize = 5, maxPoints = 40) {
-  if (series.length === 0) return [];
+  if (!series || series.length === 0) return [];
 
   const smoothed = series.map((d, i) => {
     const start = Math.max(0, i - windowSize);
@@ -16,162 +25,167 @@ function smoothSeries(series, windowSize = 5, maxPoints = 40) {
   });
 
   if (smoothed.length > maxPoints) {
-    const step = Math.floor(smoothed.length / maxPoints);
+    const step = Math.max(1, Math.floor(smoothed.length / maxPoints));
     return smoothed.filter((_, i) => i % step === 0);
   }
-
   return smoothed;
 }
 
-export default function MetricSelect({ selectedDims, headerMap, fcs, avgSeriesData, onMetricSelectChange }) {
-    const [searchTerm, setSearchTerm] = useState("");
-    const features = Object.keys(headerMap);
+function Sparkline({ points, color }) {
+  if (!points.length) return <div style={{ height: SPARK_HEIGHT }} />;
 
-    console.log("Feature contributions", fcs);
+  const values = points.map((d) => d.value);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = (max - min) || 1;
 
-    const filteredFeatures = useMemo(() => {
-        return features
-            .filter(f => f.toLowerCase().includes(searchTerm.toLowerCase()))
-            .sort((a, b) => {
-                const getMaxAbsContribution = (feature) => {
-                    const i = features.indexOf(feature);
-                    if (!fcs || i === -1 || i >= fcs.agg_feat_contrib_mat.length) return -Infinity;
-                    return Math.max(...fcs.agg_feat_contrib_mat[i].map(v => Math.abs(v)));
-                };
-                const aFC = getMaxAbsContribution(a);
-                const bFC = getMaxAbsContribution(b);
-                return bFC - aFC; // descending
-            });
-    }, [features, fcs, searchTerm]);
+  const path = points
+    .map((d, i) => {
+      const x = points.length === 1 ? 0 : (i / (points.length - 1)) * SPARK_WIDTH;
+      const y = SPARK_HEIGHT - ((d.value - min) / span) * SPARK_HEIGHT;
+      return `${x},${y}`;
+    })
+    .join(" ");
 
+  return (
+    <svg
+      width={SPARK_WIDTH}
+      height={SPARK_HEIGHT}
+      style={{ border: "1px solid #eee", borderRadius: "2px", background: "#fafafa" }}
+    >
+      <polyline fill="none" stroke={color} strokeWidth={1.5} points={path} />
+    </svg>
+  );
+}
 
-    return (
-        <div> 
-            <Input
-                placeholder="Search features..."
-                value={searchTerm}
-                onChange={e => setSearchTerm(e.target.value)}
-                prefix={<SearchOutlined />}
-                style={{ marginBottom: 8 }}
-            />
-            <List
-                style={{ width: "100%", maxWidth: 300, overflowY: "scroll", height: "calc(60vh - 50px)" }}
-                bordered
-                dataSource={filteredFeatures}
-                renderItem={(key, index) => {
-                    if (key === "cname_processed" || key === "cname_id") return null;
-                    const headerInfo = headerMap[key] || {};
-                    const description = headerInfo.desc || "No description available";
-                    const formalTitle = headerInfo.title || key;
-                    const clusterSeries = avgSeriesData?.[key] || {};
+function MetricSelect({ selectedDims, headerMap, metrics, fcs, avgSeriesData, onMetricSelectChange, hiddenClusters }) {
+  const [searchTerm, setSearchTerm] = useState("");
 
-                    return (
-                        <List.Item key={key} style={{ display: "flex", alignItems: "flex-start", padding: "5px 10px" }}>
-                        
-                        <div style={{display: 'flex', flexDirection: 'column', flexGrow: 1}}>
-                            <Tooltip 
-                                title={
-                                    <div>
-                                        <strong>{formalTitle}</strong>
-                                        <br />
-                                        {description}
-                                        {headerInfo.units && <div><small>Units: {headerInfo.units}</small></div>}
-                                    </div>
-                                }
-                                placement="top"
-                                followMouse
-                                mouseEnterDelay={0.1} 
-                            >
-                                <div style={{display: 'flex', alignItems: "center" }}>
-                                    <Checkbox
-                                        checked={selectedDims.includes(key)}
-                                        onChange={() => onMetricSelectChange(key)}
-                                        style={{ marginRight: "10px" }}
-                                    />
-                                    <span 
-                                        style={{ 
-                                            flexGrow: 1, 
-                                            whiteSpace: "nowrap", 
-                                            overflow: "hidden", 
-                                            textOverflow: "ellipsis", 
-                                            cursor: 'pointer',
-                                            textDecoration: 'none'
-                                        }}
-                                        onClick={() => onMetricSelectChange(key)}
-                                        >
-                                        {key}
-                                    </span>
-                                </div>
-                            </Tooltip>
-                            <div style={{ display: "flex", flexDirection: "row", marginTop: "4px" }}>
-                                <FeatureContributionBarGraph
-                                    graphId={`${key.replace(/\s/g, "_")}-feat-graph`}
-                                    feature={key}
-                                    fcData={
-                                        !fcs || features.indexOf(key) === -1 || features.indexOf(key) >= fcs.agg_feat_contrib_mat.length
-                                        ? []
-                                        : fcs.order_col.map((clusterId, colIndex) => {
-                                            const featureRowIndex = features.indexOf(key);
-                                            const rowData = fcs.agg_feat_contrib_mat[featureRowIndex];
-                                            const val = rowData[colIndex];
-                                            return { cluster: +clusterId, value: val };
-                                        })
-                                    }
-                                    />
-                                <div
-                                    style={{
-                                        display: "flex",
-                                        flexDirection: "column",
-                                        marginLeft: "5px",
-                                        gap: "4px",
-                                    }}
-                                >
-                                    {fcs.order_col.map(clusterId => {
-                                        const avgData = clusterSeries[clusterId];
-                                        if (!avgData || !avgData.length) return <div key={clusterId} style={{height: 20}} />;
-                                        const smooth = smoothSeries(avgData, 5, 40);
-                                        const minVal = Math.min(...smooth.map(d => d.value));
-                                        const maxVal = Math.max(...smooth.map(d => d.value));
-                                        return (
-                                            <svg
-                                                key={clusterId}
-                                                width={60}
-                                                height={20}
-                                                style={{
-                                                border: "1px solid #eee",
-                                                borderRadius: "2px",
-                                                background: "#fafafa",
-                                                }}
-                                            >
-                                            <polyline
-                                                fill="none"
-                                                stroke={colorScale(+clusterId)}
-                                                strokeWidth={1.5}
-                                                points={smooth
-                                                    .map((d, i) => {
-                                                    const x = (i / (smooth.length - 1)) * 60;
-                                                    const y =
-                                                        20 - ((d.value - minVal) / ((maxVal - minVal) || 1)) * 20;
-                                                    return `${x},${y}`;
-                                                    })
-                                                    .join(" ")}
-                                            />
-                                        </svg>
-                                        );
-                                    })}
-                                    </div>
-                                </div>
-                            </div>
-                        </List.Item>
-                    );
-                }}
-            />
-        </div>
-    )}
+  // Drive the list from the metrics the dataset actually has, rather than from
+  // whichever metrics happen to ship display metadata.
+  const features = useMemo(
+    () => (metrics?.length ? metrics : Object.keys(headerMap || {})),
+    [metrics, headerMap]
+  );
 
-export const MemoMetricSelect = React.memo(MetricSelect, (prev, next) => {
-    return prev.data === next.data &&
-           prev.nodeClusterMap === next.nodeClusterMap &&
-           prev.fcs === next.fcs &&
-           prev.selectedDims === next.selectedDims;
-});
+  const filteredFeatures = useMemo(() => {
+    const needle = searchTerm.toLowerCase();
+    const matching = features.filter((f) => f.toLowerCase().includes(needle));
+    // The charts in MetricView are laid out in this same order, so a chart can
+    // be found by where its metric sits in this list.
+    return byContribution(fcs, matching);
+  }, [features, fcs, searchTerm]);
+
+  // The contribution bars and the sparklines are read as one stack per row, so
+  // both drop a hidden cluster or they stop lining up with each other — and
+  // with the rest of the dashboard.
+  const clusterOf = (columnIndex) => fcs?.clusters?.[columnIndex] ?? columnIndex;
+  const clusterOrder = (fcs?.order_col ?? []).filter(
+    (columnIndex) => !hiddenClusters?.has(clusterOf(columnIndex))
+  );
+  const visibleBars = (metric) => contributionsFor(fcs, metric)
+    .filter((bar) => !hiddenClusters?.has(bar.cluster));
+
+  return (
+    <div style={{
+      display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0,
+      width: '100%', maxWidth: `${LIST_WIDTH}px`,
+    }}>
+      <Input
+        placeholder="Search metrics..."
+        value={searchTerm}
+        onChange={(e) => setSearchTerm(e.target.value)}
+        prefix={<SearchOutlined />}
+        style={{ marginBottom: 8 }}
+      />
+      <List
+        style={{
+          width: "100%",
+          overflowY: "auto",
+          flex: "1 1 auto",
+          minHeight: 0,
+          // Same floor as MetricView's scroller: never taller than the viewport.
+          maxHeight: "calc(100vh - 230px)",
+        }}
+        bordered
+        dataSource={filteredFeatures}
+        renderItem={(key) => {
+          const headerInfo = headerMap[key] || {};
+          const description = headerInfo.desc || "No description available";
+          const formalTitle = headerInfo.title || key;
+          const clusterSeries = avgSeriesData?.[key] || {};
+
+          return (
+            <List.Item key={key} data-metric={key} style={{ display: "flex", alignItems: "flex-start", padding: "5px 10px" }}>
+              <div style={{ display: 'flex', flexDirection: 'column', flexGrow: 1 }}>
+                <Tooltip
+                  title={(
+                    <div>
+                      <strong>{formalTitle}</strong>
+                      <br />
+                      {description}
+                      {headerInfo.units && <div><small>Units: {headerInfo.units}</small></div>}
+                    </div>
+                  )}
+                  placement="top"
+                  mouseEnterDelay={0.1}
+                >
+                  <div style={{ display: 'flex', alignItems: "center" }}>
+                    <Checkbox
+                      checked={selectedDims.includes(key)}
+                      onChange={() => onMetricSelectChange(key)}
+                      style={{ marginRight: "10px" }}
+                    />
+                    <span
+                      style={{
+                        flexGrow: 1,
+                        whiteSpace: "nowrap",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        cursor: 'pointer',
+                      }}
+                      onClick={() => onMetricSelectChange(key)}
+                    >
+                      {key}
+                    </span>
+                  </div>
+                </Tooltip>
+
+                <div style={{ display: "flex", flexDirection: "row", marginTop: "4px" }}>
+                  <FeatureContributionBarGraph
+                    graphId={`${key.replace(/\W/g, "_")}-feat-graph`}
+                    feature={key}
+                    fcData={visibleBars(key)}
+                  />
+                  <div style={{ display: "flex", flexDirection: "column", marginLeft: "5px", gap: "4px" }}>
+                    {clusterOrder.map((columnIndex) => {
+                      const cluster = fcs?.clusters?.[columnIndex] ?? columnIndex;
+                      return (
+                        <Sparkline
+                          key={cluster}
+                          points={smoothSeries(clusterSeries[cluster], 5, 40)}
+                          color={colorScale(cluster)}
+                        />
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            </List.Item>
+          );
+        }}
+      />
+    </div>
+  );
+}
+
+// Memoized on the props that actually drive a redraw. Exported as the default so
+// callers get the memoized component rather than the bare one.
+export default React.memo(MetricSelect, (prev, next) => (
+  prev.fcs === next.fcs
+  && prev.selectedDims === next.selectedDims
+  && prev.metrics === next.metrics
+  && prev.headerMap === next.headerMap
+  && prev.avgSeriesData === next.avgSeriesData
+  && prev.hiddenClusters === next.hiddenClusters
+));

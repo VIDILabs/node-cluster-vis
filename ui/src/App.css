@@ -126,3 +126,128 @@
   width: 100%;
   height: 40px;
 }
+/* --- Dashboard panel sizing ------------------------------------------------
+   The two columns have to end level, and neither can do that from a content
+   height: the left column's charts and the right column's heatmap both grow
+   with the metric count.
+
+   The height is set *on the column*, not inherited down a chain of height:100%
+   through Content -> Spin -> Row. That chain does not resolve — antd's Spin
+   wrapper and Row are not definite-height boxes — so the columns fell back to
+   content height and the charts ran off the bottom of the page.
+
+   96px is the chrome above and below: 5px layout padding, the 64px header, its
+   2px margin, the content's 5px margin, and the 5px bottom padding, with a
+   little slack. */
+.dashboard-column {
+  height: calc(100vh - 96px);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  /* A flex child otherwise refuses to shrink below its content height. */
+  min-height: 0;
+  /* Last resort only: everything inside is meant to scroll on its own. */
+  overflow: auto;
+}
+
+/* The one card per column that absorbs the slack, so both columns end level:
+   the metric-reading card on the left, the DR card on the right. */
+/* Cards that size to their content keep that size. Letting them shrink meant
+   the column silently divided a shortfall between them instead of scrolling. */
+.dashboard-column > * {
+  flex-shrink: 0;
+}
+
+.dashboard-column .panel-fill {
+  flex: 1 1 auto;
+  /* NOT min-height: 0. This card absorbs the column's slack, so a shortfall
+     lands on it first — and with overflow:hidden on the body below, shrinking
+     to zero makes it vanish rather than scroll. Past this floor the column
+     overflows and scrolls instead, which is visible and recoverable. */
+  min-height: 320px;
+  display: flex;
+  flex-direction: column;
+}
+
+.dashboard-column .panel-fill > .ant-card-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* The single row inside a filling card stretches to the body, which is what
+   gives the charts and the scatter plot a definite height to resolve against. */
+.dashboard-column .panel-fill > .ant-card-body > .ant-row {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* --- Node Similarity panel -------------------------------------------------
+   Plot above, configuration below. The stack fills the card body; the slot
+   takes the slack and the form keeps its own height, which is what gives the
+   square plot a definite box to be fitted into.
+
+   The plot is measured against the *stack*, never against its own slot: the
+   slot is sized to the plot, so measuring it would be measuring our own output
+   and the two would ratchet each other larger on every pass. `gap` here is
+   mirrored by STACK_GAP in DRPlot.js, which subtracts it from the space the
+   plot is allowed. */
+.dr-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  height: 100%;
+  min-height: 0;
+}
+
+.dr-plot-slot {
+  /* Sizes to the plot, so the controls sit directly under it. Absorbing the
+     column's slack here instead parked them at the bottom of the card with a
+     band of dead space above them. The slack falls below the controls now. */
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: center;
+}
+
+/* --- Node Similarity parameter form ----------------------------------------
+   Two columns: labels left, controls right on a single grid line each. This
+   replaced an antd Form whose labelCol/wrapperCol arithmetic had to be kept
+   summing to 24 and still left the rows loosely aligned; nothing here is bound
+   by name, so Form was only ever doing layout. */
+.dr-params {
+  display: grid;
+  grid-template-columns: 1fr 86px;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+/* Spans both columns and sits flush right, over the controls it introduces
+   rather than over the labels. */
+.dr-params-heading {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-weight: 600;
+  font-size: 13px;
+  text-align: right;
+}
+
+/* Air above a second section, none above the first. */
+.dr-params > .dr-params-heading:not(:first-child) {
+  margin-top: 6px;
+}
+
+.dr-params-label {
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The controls are the second column outright, so they line up with each other
+   and with the heading's right edge whatever their intrinsic width. */
+.dr-params > .ant-input-number,
+.dr-params > .ant-select {
+  width: 100%;
+}

@@ -1,10 +1,11 @@
 import * as d3 from 'd3';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 import { colorScale } from '../utils/colors.js';
+
+const SIZE = { width: 400, height: 400 };
 
 export default function FeatureContributionBarGraph({ feature, fcData, graphId }) {
     const featureSvgRef = useRef();
-    const [size, ] = useState({ width: 400, height: 400 });
     const AXIS_TICK_FONT_SIZE = 50;
     useEffect(() => {
         if (!featureSvgRef.current || !fcData ) return;
@@ -16,10 +17,10 @@ export default function FeatureContributionBarGraph({ feature, fcData, graphId }
         const xDomain = [-1, 1];
         const xScale = d3.scaleLinear()
             .domain(xDomain)
-            .range([margin.left, size.width - margin.right]);
+            .range([margin.left, SIZE.width - margin.right]);
         const y = d3.scaleBand()
             .domain(fcData.map(d => d.cluster))
-            .range([margin.top, size.height - margin.bottom])
+            .range([margin.top, SIZE.height - margin.bottom])
             .paddingInner(0.2);
 
         const svg = d3.select(featureSvgRef.current)
@@ -27,7 +28,7 @@ export default function FeatureContributionBarGraph({ feature, fcData, graphId }
             .attr('id', `matrix-svg`)
             .attr("width", "100%")
             .attr("height", "100%")
-            .attr("viewBox", `0 0 ${size.width} ${size.height}`)
+            .attr("viewBox", `0 0 ${SIZE.width} ${SIZE.height}`)
             .attr("preserveAspectRatio", "xMidYMid meet");
         
         /* Uncomment and adjust margin.top to display x axis */
@@ -65,7 +66,7 @@ export default function FeatureContributionBarGraph({ feature, fcData, graphId }
         
         // // Axis in middle
         // svg.append('g')
-        //     .attr('transform', `translate(${(size.width - margin.left - margin.right) / 2 + margin.left}, 0)`)
+        //     .attr('transform', `translate(${(SIZE.width - margin.left - margin.right) / 2 + margin.left}, 0)`)
         //     .call(d3.axisRight(y).tickSizeOuter(0).tickValues([]))
         //     .selectAll('text')
         //     .style("font-size", `${AXIS_TICK_FONT_SIZE}px`)
@@ -74,7 +75,7 @@ export default function FeatureContributionBarGraph({ feature, fcData, graphId }
         
         // Plot cluster y axis
         svg.append('g')
-            .attr('transform', `translate(${(size.width - margin.left - margin.right) / 2 + margin.left}, 0)`)
+            .attr('transform', `translate(${(SIZE.width - margin.left - margin.right) / 2 + margin.left}, 0)`)
             .call(d3.axisRight(y).tickSizeOuter(0).tickSizeInner(0).tickPadding(20).tickFormat(d => `c${d}`))
             .selectAll('text')
             .style("font-size", `${AXIS_TICK_FONT_SIZE}px`)

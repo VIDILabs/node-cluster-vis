@@ -1,21 +1,52 @@
-import { Card, Col, Form, Row, Select, Button, InputNumber } from "antd";
+import { Card, Select, Button, InputNumber } from "antd";
 import * as d3 from 'd3';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { colorScale } from '../utils/colors.js';
+import { lineClass, nodeClass, pointId } from '../utils/nodes.js';
+import { PARAM_LIMITS } from '../config.js';
 import LassoSelection from '../utils/lasso.js';
+import ClusterToggles from './ClusterToggles.js';
 import Tooltip from '../utils/tooltip.js';
 
 const { Option } = Select;
 
-const DRView = ({ data, type, selectedPoints, nodeClusterMap, handleRecompute, updateSelectedNodes, nNeighbors, minDist, numClusters }) => {
+// Resting and hovered radii for a point. Kept as constants because the hover-out
+// handler has to restore exactly the resting value; a mismatch made every
+// hovered point grow permanently.
+const POINT_RADIUS = 4;
+const POINT_RADIUS_HOVER = 8;
+
+// Fallback plot geometry, used before the container has been measured and in
+// jsdom, which does no layout. The real box comes from the panel: the card
+// stretches to fill its column, and the scatter is drawn at that size 1:1 so
+// the embedding uses the space instead of being letterboxed inside it.
+//
+// The plot is square. E1 and E2 are two axes of one embedding with no units of
+// their own, so a rectangular box stretches one of them and the distances the
+// clustering is read from stop being comparable between the two directions.
+// The side is the smaller of the slot's width and height, which is what keeps
+// it square in a narrow column without running past the bottom of the card.
+const SIZE = { width: 300, height: 300 };
+export const MIN_SIDE = 220;
+// Must match `gap` on .dr-stack in App.css: the plot's side is worked out from
+// the space left over after the controls, and that space includes the gap.
+export const STACK_GAP = 8;
+const MARGIN = { top: 10, right: 20, bottom: 20, left: 20 };
+const OPACITY_SELECTED = 1;
+const OPACITY_MUTED = 0.4;
+
+const DRView = ({ data, type, selectedPoints, nodeClusterMap, handleRecompute, updateSelectedNodes, nNeighbors, minDist, numClusters, clusters, hiddenClusters, onToggleCluster }) => {
     const svgContainerRef = useRef();
-    const [size, setSize] = useState({ width: 300, height: 300});
-    const [margin, setMargin] = useState({ top: 10, right: 20, bottom: 20, left: 20 });
+    // What the plot is measured against. Deliberately *not* the plot's own
+    // slot: the slot is sized to the plot, so observing it would be measuring
+    // our own output. The stack's height comes from the card, and the controls
+    // keep whatever height they need; the plot gets what is left.
+    const stackRef = useRef();
+    const controlsRef = useRef();
+    const [size, setSize] = useState(SIZE);
     const [localNNeighbors, setLocalNNeighbors] = useState(nNeighbors);
     const [localMinDist, setLocalMinDist] = useState(minDist);
     const [localNumClusters, setLocalNumClusters] = useState(numClusters);
-    const [highlight, setHighlight] = useState(1);
-    const [nonHighlight, setNonHighlight] = useState(0.4);
     const [tooltip, setTooltip] = useState({
               visible: false,
               content: '',
@@ -23,96 +54,183 @@ const DRView = ({ data, type, selectedPoints, nodeClusterMap, handleRecompute, u
               y: 0
           });
 
-    function getIdVal(d) {
-        return (type === 'feature') ? d.Measurement : d.nodeId;
-      }
+    const getIdVal = useCallback(
+        (d) => (type === 'feature' ? d.Measurement : d.nodeId),
+        [type]
+    );
 
+    // Hiding a cluster drops its points, the same as it drops the heatmap's
+    // columns and the line charts' polylines. The scales below are still built
+    // from the full embedding, so the remaining points stay exactly where they
+    // were — a hidden cluster must not rescale the view it was part of.
+    const visible = useMemo(() => (
+        hiddenClusters?.size
+            ? data?.filter(d => !hiddenClusters.has(nodeClusterMap?.get(d.nodeId)))
+            : data
+    ), [data, hiddenClusters, nodeClusterMap]);
+
+    // Mirror parent-owned parameters into the form. Without this the inputs keep
+    // showing the previous dataset's values after a swap or a defaults reset.
+    useEffect(() => { setLocalNNeighbors(nNeighbors); }, [nNeighbors]);
+    useEffect(() => { setLocalMinDist(minDist); }, [minDist]);
+    useEffect(() => { setLocalNumClusters(numClusters); }, [numClusters]);
+
+    // Track the panel the card gives us. Returning the previous object when
+    // nothing changed keeps a ResizeObserver callback from re-rendering forever.
     useEffect(() => {
-        if (!svgContainerRef.current || !data ) return;
+        const stack = stackRef.current;
+        if (!stack) return undefined;
+        const measure = () => setSize((prev) => {
+            const width = stack.clientWidth || SIZE.width;
+            // The controls are laid out first and keep their height; the plot
+            // takes the largest square that fits in what remains. Below the
+            // floor the card scrolls rather than the plot collapsing.
+            const available = stack.clientHeight
+                ? stack.clientHeight - (controlsRef.current?.offsetHeight || 0) - STACK_GAP
+                : SIZE.height;
+            const side = Math.max(Math.min(width, available), MIN_SIDE);
+            return prev.width === side && prev.height === side ? prev : { width: side, height: side };
+        });
+        measure();
+        if (typeof ResizeObserver === 'undefined') return undefined;
+        // Both: the stack changes with the viewport, the controls with the
+        // cluster count — ClusterToggles gains a button per cluster, and a k of
+        // 9 wraps onto a second line.
+        const observer = new ResizeObserver(measure);
+        observer.observe(stack);
+        if (controlsRef.current) observer.observe(controlsRef.current);
+        return () => observer.disconnect();
+    }, []);
 
-        // NOTE: this currently does nothing as 1) setSize() runs after this useEffect() runs,
-        //       and 2) this useEffect() does not depend on Size. 
-        // const { w, h } = svgContainerRef.current.getBoundingClientRect();
-        // setSize({ w, h });
-        
-        const width = size.width;
-        const height = size.height;
+    // Create the SVG shell once. Points themselves are drawn by the join below.
+    useEffect(() => {
+        if (!svgContainerRef.current) return undefined;
 
-        const xKey = 'E1';
-        const yKey = 'E2';
-
-        const xScale = d3.scaleLinear()
-            .domain([d3.min(data, d => +d[xKey]) - 1, d3.max(data, d => +d[xKey]) + 1])
-            .range([0, width - margin.right]);
-
-        const yScale = d3.scaleLinear()
-            .domain([d3.min(data, d => +d[yKey]) - 1, d3.max(data, d => +d[yKey]) + 1])
-            .range([height - margin.bottom, margin.top]);
-        
         const svg = d3.select(svgContainerRef.current)
           .append("svg")
           .attr('id', `dr-chart-svg-${type}`)
-          .attr("width", "100%")
-          .attr("height", "100%")
-          .attr("viewBox", `0 0 ${size.width} ${size.height}`)
+          // Sized in pixels from the measurement below, never in percent: an
+          // SVG at height:100% inside an auto-height div computes to zero, so
+          // one broken link in the percentage chain made the plot vanish
+          // rather than merely misfit.
+          .attr("width", SIZE.width)
+          .attr("height", SIZE.height)
+          .attr("viewBox", `0 0 ${SIZE.width} ${SIZE.height}`)
           .attr("preserveAspectRatio", "xMidYMid meet")
           .style("border", "1px solid #dddddd")
           .style("border-radius", "6px");
 
-          const zoomLayer = svg.append("g")
-          .attr("class", "zoom-layer");
+        const zoomLayer = svg.append("g").attr("class", "zoom-layer");
 
-        let circs = zoomLayer.selectAll(".dr-circle")
-            .data(data)
-            .enter()
-            .append("circle")
-            .attr("class", (d, i) => "dr-circle")
-            .attr('id', d => getIdVal(d))
-            .attr("cx", d => xScale(d[xKey]))
-            .attr("cy", d => yScale(d[yKey]))
-            .attr('stroke','black')
-            .attr('stroke-width', '1px')
-            .attr("r", 4)
-            .style('fill', d => colorScale(nodeClusterMap.get(d.nodeId)))
-            .style("opacity", d => {
-                return selectedPoints.includes(d.nodeId) ? highlight : nonHighlight;
-            })
-            .attr("_prevOpacity", d => {
-                return selectedPoints.includes(d.nodeId) ? highlight : nonHighlight;
-            })
+        const zoom = d3.zoom()
+            .scaleExtent([0.5, 10])
+            .filter(event => event.type === "wheel")
+            .on("zoom", (event) => zoomLayer.attr("transform", event.transform));
+
+        svg.call(zoom);
+
+        return () => { svg.remove(); };
+    }, [type]);
+
+    // Kept out of the draw effect below, which bails early when there is no
+    // embedding yet — the empty frame still has to be the right shape.
+    useEffect(() => {
+        d3.select(svgContainerRef.current).select("svg")
+            .attr("width", size.width)
+            .attr("height", size.height)
+            .attr("viewBox", `0 0 ${size.width} ${size.height}`);
+    }, [size]);
+
+    // Draw/update points. A keyed join (rather than the previous update-only
+    // pass) means nodes appearing or disappearing — on a dataset swap or a
+    // streamed batch — are added and removed instead of leaving stale marks.
+    useEffect(() => {
+        if (!svgContainerRef.current || !data?.length) return;
+
+        const svg = d3.select(svgContainerRef.current).select("svg");
+        const zoomLayer = svg.select(".zoom-layer");
+        if (zoomLayer.empty()) return;
+
+        const xKey = 'E1';
+        const yKey = 'E2';
+
+        // Pad the extent so points never sit flush against the border.
+        const [xMin, xMax] = d3.extent(data, d => +d[xKey]);
+        const [yMin, yMax] = d3.extent(data, d => +d[yKey]);
+        const xPad = ((xMax - xMin) || 1) * 0.05;
+        const yPad = ((yMax - yMin) || 1) * 0.05;
+
+        const xScale = d3.scaleLinear()
+            .domain([xMin - xPad, xMax + xPad])
+            .range([MARGIN.left, size.width - MARGIN.right]);
+
+        const yScale = d3.scaleLinear()
+            .domain([yMin - yPad, yMax + yPad])
+            .range([size.height - MARGIN.bottom, MARGIN.top]);
+
+        svg.node().xScale = xScale;
+        svg.node().yScale = yScale;
+
+        const isSelected = (d) => (
+            selectedPoints.length === 0 || selectedPoints.includes(getIdVal(d))
+        );
+        const resting = (d) => (isSelected(d) ? OPACITY_SELECTED : OPACITY_MUTED);
+
+        zoomLayer.selectAll(".dr-circle")
+            .data(visible, getIdVal)
+            .join(
+                enter => enter.append("circle")
+                    .attr("class", d => `dr-circle ${nodeClass(d.nodeId)}`)
+                    .attr('id', d => pointId(getIdVal(d)))
+                    .attr("cx", d => xScale(+d[xKey]))
+                    .attr("cy", d => yScale(+d[yKey]))
+                    .attr('stroke', 'black')
+                    .attr('stroke-width', '1px')
+                    .attr("r", POINT_RADIUS)
+                    .style('fill', d => colorScale(nodeClusterMap.get(d.nodeId))),
+                // Named, so it cannot cancel an opacity transition. Points used
+                // to fade in from opacity 0 on an unnamed transition; any redraw
+                // inside those 800ms cancelled the fade and left the whole
+                // embedding stuck at opacity 0 — drawn, hit-testable by the
+                // lasso, and completely invisible.
+                update => update
+                    .call(sel => sel.transition("move").duration(800)
+                        .attr("cx", d => xScale(+d[xKey]))
+                        .attr("cy", d => yScale(+d[yKey]))
+                        .style('fill', d => colorScale(nodeClusterMap.get(d.nodeId)))),
+                exit => exit.call(sel => sel.transition("exit").duration(300)
+                    .style("opacity", 0).remove())
+            )
+            // A point that exits and comes back inside those 300ms is matched
+            // as an update while still carrying its pending removal; cancelling
+            // it here keeps the node from vanishing a moment later.
+            .interrupt("exit")
+            // Set outright on every draw, for entering and updating points
+            // alike, so no interrupted animation can leave one unpainted.
+            // Same contract as the line charts: whatever dims a point
+            // temporarily restores from this rather than guessing.
+            .attr("data-rest-opacity", resting)
+            .style("opacity", resting)
             .on("mouseover", function (event, d) {
-                let circle = d3.select(this)
+                const line = lineClass(d.nodeId);
 
-                circle.attr("_prevOpacity", circle.style("opacity"));
+                d3.select(this)
+                    .transition().duration(150)
+                    .attr("r", POINT_RADIUS_HOVER)
+                    .style("opacity", OPACITY_SELECTED);
 
-                circle
-                    .transition()
-                    .duration(150)
-                    .attr("r", 8)
-                    .style("opacity", highlight)
-
-                // highlighting mrdmd cell 
-                d3.selectAll(`.node-${d.nodeId}`)
-                    .transition()
-                    .duration(150)
+                // highlighting the matching heatmap cell
+                d3.selectAll(`.${nodeClass(d.nodeId)}`)
+                    .transition().duration(150)
                     .style("stroke", "black")
                     .style("stroke-width", 2);
 
-                // highlighting time series
-                let lines = d3.selectAll(".line-svg").selectAll("path.line");
-                lines.each(function(lineData) {
-                    if (lineData[0] === d.nodeId) {
-                        d3.select(this)
-                            .transition()
-                            .duration(150)
-                            .style("opacity", 1)
-                    } else {
-                        d3.select(this)
-                            .transition()
-                            .duration(150)
-                            .style("opacity", 0.1); 
-                    }
-                });
+                // highlighting the matching time series
+                d3.selectAll("path.line")
+                    .transition().duration(150)
+                    .style("opacity", function () {
+                        return d3.select(this).classed(line) ? 1 : 0.1;
+                    });
 
                 setTooltip({
                     visible: true,
@@ -122,158 +240,104 @@ const DRView = ({ data, type, selectedPoints, nodeClusterMap, handleRecompute, u
                 });
             })
             .on("mouseout", function (event, d) {
-                let circle = d3.select(this)
+                d3.select(this)
+                    .transition().duration(150)
+                    .attr("r", POINT_RADIUS)
+                    .style("opacity", isSelected(d) ? OPACITY_SELECTED : OPACITY_MUTED);
 
-                let prevOpacity = circle.attr("_prevOpacity") || nonHighlight; 
-                circle.transition()
-                    .duration(150)
-                    .attr("r", 5)
-                    .style("opacity", prevOpacity);
-
-                d3.selectAll(`.node-${d.nodeId}`)
-                    .transition()
-                    .duration(150)
-                    .style("stroke", "none") // Remove border
+                d3.selectAll(`.${nodeClass(d.nodeId)}`)
+                    .transition().duration(150)
+                    .style("stroke", "none")
                     .style("stroke-width", 0);
 
-                let lines = d3.selectAll(".line-svg").selectAll("path.line");
-
-                // Resetting all line styles
-                lines.transition()
-                    .duration(150)
+                d3.selectAll("path.line")
+                    .transition().duration(150)
                     .style("stroke-width", 1)
-                    .style("opacity", highlight)
+                    // Back to each line's own resting opacity — restoring a
+                    // single value here un-dimmed unselected lines on hover-out.
+                    .style("opacity", function () {
+                        return d3.select(this).attr("data-rest-opacity") ?? OPACITY_SELECTED;
+                    });
 
-                setTooltip(prev => ({
-                    ...prev,
-                    visible: false,
-                }));
-            })
-            .style('opacity', 0);
-
-            circs
-                .transition()
-                .duration(800)
-                .style("opacity", d => {
-                    const idVal = getIdVal(d);
-                    return selectedPoints.includes(idVal) ? highlight : nonHighlight;
-                })
-
-            svg.node().xScale = xScale;
-            svg.node().yScale = yScale;
-
-            const zoom = d3.zoom()
-            .scaleExtent([0.5, 10])
-            .filter(event => event.type === "wheel")   
-            .on("zoom", (event) => {
-              zoomLayer.attr("transform", event.transform);
+                setTooltip(prev => ({ ...prev, visible: false }));
             });
-        
-            svg.call(zoom);
-    
-        return () => {
-            svg.remove();
+    }, [data, visible, nodeClusterMap, selectedPoints, getIdVal, size]);
+
+    useEffect(() => {
+        const resting = (d) => {
+            const idVal = getIdVal(d);
+            return selectedPoints.includes(idVal) || selectedPoints.length === 0
+                ? OPACITY_SELECTED
+                : OPACITY_MUTED;
         };
-        
-    }, [type]);
 
-    // scatter plot update
-    useEffect(() => {
-        if (!data || data.length === 0 || !svgContainerRef.current) return;
-
-        const svg = d3.select(svgContainerRef.current).select("svg");
-        const xKey = 'E1';
-        const yKey = 'E2';
-
-        // const xScale = svg.node()?.xScale;
-        // const yScale = svg.node()?.yScale;
-        // if (!xScale || !yScale) return;
-
-        // recalculating bounds with padding
-        const xExtent = d3.extent(data, d => +d[xKey]);
-        const yExtent = d3.extent(data, d => +d[yKey]);
-
-        const xScale = d3.scaleLinear()
-            .domain([xExtent[0], xExtent[1]])
-            .range([0, size.width - margin.right]);
-
-        const yScale = d3.scaleLinear()
-            .domain([yExtent[0], yExtent[1]])
-            .range([size.height - margin.bottom, margin.top]);
-
-        // Store updated scales on SVG
-        svg.node().xScale = xScale;
-        svg.node().yScale = yScale;
-
-        // animating existing points to new positions
-        svg.selectAll(".dr-circle")
-            .data(data, d => getIdVal(d))  
-            .transition()
-            .duration(1000)
-            .attr("cx", d => xScale(+d[xKey]))
-            .attr("cy", d => yScale(+d[yKey]));
-
-    }, [data]);
-
-    useEffect(() => {
-        d3.select(".zoom-layer").selectAll(".dr-circle")
-            .style('fill', d => colorScale(nodeClusterMap.get(d.nodeId)))
-    }, [nodeClusterMap]);
-
-    useEffect(() => {
         d3.select(svgContainerRef.current)
             .selectAll(".dr-circle")
+            .attr("data-rest-opacity", resting)
             .transition()
             .duration(300)
-            .style("opacity", d => {
-                const idVal = getIdVal(d);
-                if (selectedPoints.includes(idVal) || selectedPoints.length === 0) {
-                    return highlight;
-                } else {
-                    return nonHighlight;
-                }
-            });
-    }, [selectedPoints]);
+            .style("opacity", resting);
+    }, [selectedPoints, getIdVal]);
 
     // Lasso selection
     const handleSelection = (selected) => {
         const chart = d3.select(svgContainerRef.current).select("svg");
                 
+        const resting = (d) => {
+            const idVal = getIdVal(d);
+            return selected.includes(idVal) || selected.length === 0
+                ? OPACITY_SELECTED
+                : OPACITY_MUTED;
+        };
+
         chart.selectAll('.dr-circle')
-            .style("opacity", d => {
-                const idVal = getIdVal(d);
-                if (selected.includes(idVal) || selected.length == 0) {
-                    return highlight; 
-                } else {
-                    return nonHighlight;
-                }
-        });
+            .attr("data-rest-opacity", resting)
+            .style("opacity", resting);
 
         updateSelectedNodes(selected);
     };
 
-    const clusterOptions = Array.from({ length: 19 }, (_, i) => i + 2); // [2..20]
+    const { numClusters: clusterLimits, nNeighbors: neighborLimits, minDist: distLimits } = PARAM_LIMITS;
+    const clusterOptions = Array.from(
+        { length: clusterLimits.max - clusterLimits.min + 1 },
+        (_, i) => i + clusterLimits.min
+    );
 
     return (
         <>
             <Card
                 title="NODE SIMILARITY VIEW"
                 size="small"
-                style={{ height: 'auto' }}
+                // Takes the slack in its column, so the right-hand panel ends
+                // level with the left-hand one at any viewport height.
+                className="panel-fill"
             >
-            <Row gutter={12} align="top">
-                {/* Scatterplot */}
-                <Col span={16}>
-                    <div ref={svgContainerRef} style={{ height: '300px' }}></div>
+            {/* Plot above, configuration below. Side by side, the form set the
+                panel's width and the scatter got whatever was left, which is
+                backwards: the embedding is the reason the panel exists. Stacked,
+                the panel can be as narrow as the plot wants to be. */}
+            <div ref={stackRef} className="dr-stack">
+                {/* The slot sizes to the plot rather than absorbing the card's
+                    slack — otherwise the controls are pushed to the bottom of
+                    the card with a gap between them and the plot they belong
+                    to. Any leftover height falls below the controls instead. */}
+                <div className="dr-plot-slot">
+                    <div
+                        ref={svgContainerRef}
+                        // Sized in pixels from the measurement above, never in
+                        // percent: an SVG at height:100% inside an auto-height
+                        // div computes to zero.
+                        style={{ width: `${size.width}px`, height: `${size.height}px` }}
+                    ></div>
                     <LassoSelection
                         svgRef={svgContainerRef}
                         targetItems={'.dr-circle'}
                         onSelect={handleSelection}
                     />
-                </Col>
+                </div>
 
-                {/* Config forms stacked vertically */}
-                <Col span={7}>
+                {/* Config forms, directly below the plot */}
+                <div ref={controlsRef} style={{ flexShrink: 0 }}>
                     <div
                         id="form-container"
                         style={{
@@ -283,73 +347,65 @@ const DRView = ({ data, type, selectedPoints, nodeClusterMap, handleRecompute, u
                             alignItems: 'stretch',
                         }}
                         >
-                        {/* UMAP Parameters */}
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                            <p style={{ margin: 0, fontWeight: 'bold' }}>UMAP Parameters:</p>
-                            <Form
-                                layout="horizontal"
-                                colon={false}
-                                initialValues={{numClusters: localNumClusters}}
-                                style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}
-                            >
-                            <Form.Item
-                                label="n_neighbors"
-                                labelCol={{ span: 16 }}
-                                wrapperCol={{ span: 10 }}
-                                style={{ marginBottom: '4px' }}
-                            >
-                                <InputNumber
-                                    min={3}
-                                    max={50}
-                                    step={1}
-                                    defaultValue={localNNeighbors}
-                                    onChange={(val) => setLocalNNeighbors(val)}
-                                    style={{ width: '100%' }}
-                                />
-                            </Form.Item>
+                        {/* A plain two-column grid, not an antd Form. Nothing
+                            here is bound by name — the controls are all
+                            explicitly controlled, and the comment below says
+                            why — so Form was only ever doing layout, and its
+                            24-column labelCol/wrapperCol arithmetic was both
+                            fiddlier and looser than one grid line. Each section
+                            heading spans both columns and is right-aligned, so
+                            it sits over the inputs rather than the labels. */}
+                        <div className="dr-params">
+                            <p className="dr-params-heading">UMAP Parameters</p>
 
-                            <Form.Item
-                                label="min_dist"
-                                labelCol={{ span: 16 }}
-                                wrapperCol={{ span: 10 }}
-                                style={{ marginBottom: '4px' }}
+                            <span className="dr-params-label">n_neighbors</span>
+                            <InputNumber
+                                size="small"
+                                aria-label="n_neighbors"
+                                min={neighborLimits.min}
+                                max={neighborLimits.max}
+                                step={neighborLimits.step}
+                                value={localNNeighbors}
+                                onChange={(val) => setLocalNNeighbors(val)}
+                            />
+
+                            <span className="dr-params-label">min_dist</span>
+                            <InputNumber
+                                size="small"
+                                aria-label="min_dist"
+                                min={distLimits.min}
+                                max={distLimits.max}
+                                step={distLimits.step}
+                                value={localMinDist}
+                                onChange={(val) => setLocalMinDist(val)}
+                            />
+
+                            <p className="dr-params-heading">K-Means</p>
+
+                            <span className="dr-params-label">Num clusters</span>
+                            {/* Deliberately not bound to a Form by name: antd
+                                would then own the value and ignore the
+                                controlled `value` here, which left the dropdown
+                                stale after a reset. */}
+                            <Select
+                                size="small"
+                                aria-label="Num clusters"
+                                value={localNumClusters}
+                                onChange={(val) => setLocalNumClusters(val)}
                             >
-                                <InputNumber
-                                    min={0.0}
-                                    max={1.0}
-                                    step={0.1}
-                                    defaultValue={localMinDist}
-                                    onChange={(val) => setLocalMinDist(val)}
-                                    style={{ width: '100%' }}
-                                />
-                            </Form.Item>
-                            {/* K-Means */}
-                            <p style={{ margin: 0, fontWeight: 'bold' }}>K-Means:</p>
-                            <Form.Item
-                                name="numClusters"
-                                label="Num clusters"
-                                labelCol={{ span: 15 }}
-                                wrapperCol={{ span: 14 }}
-                                style={{ marginBottom: 0 }}
-                            >
-                                <Select
-                                    style={{ width: '100%' }}
-                                    value={localNumClusters}
-                                    onChange={(val) => setLocalNumClusters(val)}
-                                >
                                 {clusterOptions.map((num) => (
-                                    <Option key={num} value={num}>
-                                    {num}
-                                    </Option>
+                                    <Option key={num} value={num}>{num}</Option>
                                 ))}
-                                </Select>
-                            </Form.Item>
-                            </Form>      
-                        </div>               
+                            </Select>
+                        </div>
+              
                         <div
                             style={{
                                 display: "flex",
-                                flexDirection: "column", // stack vertically
+                                // Side by side: below the plot these span the
+                                // whole panel, and two full-width buttons read
+                                // as two unrelated actions.
+                                flexDirection: "row",
                                 gap: "6px",
                                 marginTop: "8px",
                                 alignItems: "stretch",
@@ -357,6 +413,7 @@ const DRView = ({ data, type, selectedPoints, nodeClusterMap, handleRecompute, u
                             >
                             <Button
                                 size="small"
+                                style={{ flex: 1 }}
                                 onClick={() =>
                                     handleRecompute(localNumClusters, localNNeighbors, localMinDist, true, false)
                                 }
@@ -366,19 +423,31 @@ const DRView = ({ data, type, selectedPoints, nodeClusterMap, handleRecompute, u
                             </Button>
                             <Button
                                 size="small"
+                                style={{ flex: 1 }}
                                 onClick={() => {
-                                    setLocalNNeighbors(15);
-                                    setLocalMinDist(0.3);
-                                    setLocalNumClusters(4);
+                                    // The parent owns the dataset's defaults; ask it to
+                                    // restore them and mirror whatever it settles on
+                                    // rather than guessing fixed numbers here.
                                     handleRecompute?.(localNumClusters, localNNeighbors, localMinDist, true, true);
                                 }}
                             >
                             Reset Defaults
                             </Button>
                         </div>
+                        {/* The one place cluster visibility is set. It lives
+                            here, next to the controls that decide how many
+                            clusters there are, rather than in each view that
+                            honours it — the same buttons in two panels read as
+                            two independent filters. */}
+                        <ClusterToggles
+                            clusters={clusters}
+                            hidden={hiddenClusters}
+                            onToggle={onToggleCluster}
+                            label="Show clusters:"
+                        />
                     </div>
-                </Col>
-            </Row>
+                </div>
+            </div>
         </Card>
 
         <Tooltip
