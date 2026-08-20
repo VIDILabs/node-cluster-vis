@@ -72,7 +72,7 @@ describe('timestamp round-trip', () => {
 describe('BaselineControls', () => {
   test('the automatically computed window is what the fields open on', () => {
     draw();
-    expect(screen.getByText('Baseline Controls')).toBeInTheDocument();
+    expect(screen.getByText('Baseline Configuration')).toBeInTheDocument();
     expect(box('minimum')).toHaveValue('0.25');
     expect(box('maximum')).toHaveValue('12.5');
     expect(box('start')).toHaveValue('2024-01-01 08:30:00');

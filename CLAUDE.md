@@ -137,8 +137,8 @@ and path segments forced a `%`-for-space hack that broke on other characters.
 | `GET /api/clusters` | Re-label a cached embedding for a new k |
 | `GET /api/mrdmd` | Per-node deviation from a metric baseline (`start`/`end` scope it) |
 | `GET /api/coverage` | Per-cluster baseline conformance and blank readings over time (`nodes`, `bins`, `metrics`, `baselines`) |
-| `POST /api/stream/next` | Append the next batch and recompute |
-| `GET /api/stream/status` | Batch progress |
+| `POST /api/stream/next` | Fold in new data and recompute; `waiting` when there is none |
+| `GET /api/stream/status` | Prepared batches left, and whether the source is watchable |
 
 Responses are **gzip/brotli compressed** (`flask_compress.Compress(app)`; off by
 default in Flask). `/api/series` is long, highly repetitive JSON — the same node
@@ -215,6 +215,77 @@ unanimous columns, just over the 16 minimum — but the margin is the point:
 against `MRDMD_BASELINE_COVERAGE` the same metric gets 178. Requiring every node
 costs roughly 8x the usable baseline, so the failure is one bad export away
 whatever the current numbers say.
+
+**Streaming** (`server._pending_stream_rows`). Two sources of new data, tried in
+order: a numbered `batch_NNN.csv` in `BATCH_DIR`, then **the active dataset's own
+source, re-read and diffed** — rows stamped later than the newest one in memory.
+The second is what "watch the selected source" means for a file-backed dataset:
+a collector appending to the same CSV is picked up with no fixtures at all. It
+costs a full re-read per poll (~0.3s on the sample), which is why the interval is
+seconds.
+
+**A batch payload does not carry every view.** `/api/stream/next` returns the
+series, the embedding, the contributions and the z-scores; it returns no
+coverage and no cluster averages. Those two are per-*cluster* artifacts, so they
+go stale the moment `applyDrPayload` re-labels the nodes, and neither extends
+over the buckets the new rows just added — the Time Domain View sat frozen on
+the pre-stream buckets while every panel beside it advanced. The streaming tick
+therefore refetches `/api/coverage` and `/api/cluster-averages` itself, and
+passes the batch's baselines to the former **explicitly**: `setBaselines` has
+not committed at that point, so `baselinesStateRef` still holds the previous
+window (the same hazard as `updateBaseline`).
+
+`/api/stream/status`'s `available` is the **total** number of prepared batch
+files, not the number remaining — batches are left only while `nextBatch` is
+short of it. `exhausted` is the field that already accounts for both that and a
+watchable source.
+
+Nothing new is `status: waiting` with a 200, **not** a 404. The client keeps
+polling and touches no state — repainting identical data would flash every chart
+once per interval — and a watchable source means the stream never "exhausts".
+Only a prepared batch advances `stream_index`; letting a source tail advance it
+made one tailed append skip `batch_000.csv`, the two mechanisms consuming each
+other's position.
+
+`store.append` enforces that a batch is a **continuation**, not a new dataset:
+columns the dataset does not already have are dropped, and a batch with *no*
+node overlap raises `DataSourceError` (422). Both rules exist because the failure
+was silent and expensive — appending the raw ganglia export to the anonymized
+sample produced a 315-node, 46-metric frame spanning two islands 52 days apart,
+leaked real hostnames into an anonymized demo, and then 500'd in UMAP. The append
+is also **undoable**: it used to be committed before the recompute ran, so a
+batch the pipeline could not digest stayed loaded and every later request served
+the corrupted frame, recoverable only by restarting. `stream_next` now rolls back
+via `store.restore` and returns a 422.
+
+`server/data/batch/` holds the **streaming fixture**: 12 batches that continue
+`sample_metrics.csv` exactly — the same 120 anonymized nodes, the same 8 metrics,
+resuming at 18:24 one cadence step after the sample ends at 18:23, running to
+20:23. 14,400 rows, 1.5MB, git-tracked so a fresh clone can exercise streaming.
+Each batch folds in in ~1.7s, inside the 5s poll interval, and the clustering
+genuinely moves as they arrive (k drifts 2 -> 4 on the bundled fixture).
+
+They were rebuilt from `ganglia_2024-02-22.csv`, which is safe to use *only*
+because it carries the identical 195-node set as `ganglia_2024-02-21.csv` (the
+sample's source) and continues it in real time — `pseudonymize` orders labels by
+salted hash *within the given set*, so the same node set is what makes
+`node-NNN` mean the same host across the two runs. Regenerate with:
+
+```bash
+python scripts/anonymize.py data/ganglia_2024-02-22.csv --out data/batch \
+    --batches 12 --nodes 120 --stride 4 --timestamps 120 \
+    --epoch '2024-01-01 18:24:00' \
+    --metric-list 'cpu_wio,mem_free,Missed Buffers_P1,cpu_user,bytes_out,proc_run,bytes_in,pkts_out'
+```
+
+`--stride` sets the cadence directly (every Nth source sample) while
+`--timestamps` caps the count — needed together here, since `--timestamps` alone
+sets cadence only indirectly. `--epoch` rebases onto the instant the batches
+should resume from, and `--metric-list` forces the exact columns rather than
+re-ranking by variance, which on a different day's export picks a different set.
+Batches are split on **timestamp** boundaries, never row counts: a split
+timestamp would deliver some of a moment's nodes now and the rest next tick, and
+every node-vs-time pivot downstream would see a gap that was never in the data.
 
 **Time scoping** (`server._scoped_frame`). `/api/dr`, `/api/clusters`,
 `/api/mrdmd` and `/api/cluster-averages` take optional `start`/`end` and narrow
@@ -641,6 +712,20 @@ when the clustering changes, which also keeps them off the metric-toggle path.
   whatever range had been brushed on the timeline. It reads the list from a ref
   instead. Same hazard as the inline `timeRange` array, one level up: a
   *handler* that churns costs as much as a value that churns.
+- `apply_second_dr` fed the DR2 pivot straight to UMAP, which rejects the whole
+  matrix with `Input contains NaN` if any node lacks a DR1 value for any metric.
+  That is an ordinary gap, not an error: DR1 is a demeaned, standardized
+  projection, so missing entries are centred at 0 — the node sits mid-axis on
+  the metric it says nothing about instead of being dragged to an edge.
+- `store.append` committed the batch before the recompute, so a batch that threw
+  left the store holding it. Roll back on failure.
+- Streaming answered "nothing new" with a 404, which the client treated as
+  end-of-stream and switched the toggle off. A watched source is idle, not
+  exhausted.
+- The batch fixtures were the *raw* ganglia export while the loaded dataset was
+  the anonymized sample: 195 real hostnames against 120 `node-NNN` labels, zero
+  overlap. Batches must be generated from the same source, node set and metric
+  list as the dataset they continue.
 - Heatmap and DR hover handlers restored a fixed opacity on mouse-out, which
   permanently un-dimmed whatever had been hovered. They now read
   `data-rest-opacity` off each line.
@@ -652,3 +737,8 @@ when the clustering changes, which also keeps them off the metric-toggle path.
 - A failed baseline commit left the new window in `baselines` and in
   `baselinesRef`, so the boxes and the rectangle showed a baseline the server
   had rejected and the z-scores were never computed against.
+- `/api/stream/next` returns no coverage, so nothing refetched it: the Time
+  Domain View kept the buckets it had when streaming was switched on while the
+  charts, the embedding and the heatmap all advanced. The cluster-average
+  sparklines were stale the same way, since the clustering moves with each
+  batch.

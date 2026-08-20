@@ -51,6 +51,17 @@ def handle_baseline_window_error(error):
     return jsonify({'error': str(error)}), error.status
 
 
+class StreamBatchError(ValueError):
+    """A stream batch the pipeline could not digest. The dataset is rolled back."""
+
+    status = 422
+
+
+@app.errorhandler(StreamBatchError)
+def handle_stream_batch_error(error):
+    return jsonify({'error': str(error)}), error.status
+
+
 class TimeWindowError(ValueError):
     """A time-scoped window that holds too little to analyse."""
 
@@ -625,35 +636,88 @@ def mrdmd_route():
 
 # --- streaming -------------------------------------------------------------
 
+def _iso_stamp(value):
+    return None if pd.isna(value) else pd.Timestamp(value).strftime('%Y-%m-%dT%H:%M:%S')
+
+
+def _pending_stream_rows():
+    """New rows, a label, and whether they came from a numbered batch file.
+
+    Two sources, in order:
+
+    1. a numbered batch file in ``BATCH_DIR``, which replays a prepared
+       sequence; then
+    2. the active dataset's own source, re-read and diffed against what is
+       loaded — rows stamped later than the newest one in memory.
+
+    (2) is what "watch the selected source" means for a file-backed dataset: a
+    collector appending to the same CSV is picked up with no fixtures at all.
+    It costs a full re-read per poll, which is ~0.3s on the bundled sample and
+    the reason the poll interval is seconds rather than milliseconds.
+    """
+    index = store.stream_index
+    filename = f'batch_{index:03d}.csv'
+    path = os.path.join(config.BATCH_DIR, filename)
+    if os.path.isfile(path):
+        return pd.read_csv(path), filename, True
+
+    dataset = store.dataset
+    if not dataset.path or not os.path.isfile(dataset.path):
+        return None, None, False
+
+    try:
+        fresh = datasource.load_dataset(dataset.source, name=dataset.name).frame
+    except DataSourceError:
+        # The source is mid-write, or has been replaced by something that no
+        # longer conforms. Neither is worth stopping the stream over.
+        return None, None, False
+
+    cutoff = dataset.frame[TIME].max()
+    newer = fresh[fresh[TIME] > cutoff]
+    if newer.empty:
+        return None, None, False
+    return newer, f'{dataset.name} after {cutoff:%Y-%m-%d %H:%M:%S}', False
+
+
 @app.route('/api/stream/next', methods=['POST'])
 def stream_next():
-    """Append the next batch file and return refreshed DR + mrDMD results.
+    """Advance the stream and return refreshed DR + mrDMD results.
 
-    Batches are read in order from ``config.BATCH_DIR``; a 404 means the
-    sequence is exhausted.
+    ``status`` is ``waiting`` when nothing new has arrived — the caller should
+    keep polling rather than stop, since a watched source may simply not have
+    been written to yet.
     """
     payload = request.get_json(silent=True) or {}
     metrics = _known_metrics(payload.get('metrics') or [])
     nodes = payload.get('nodes') or []
 
-    index = store.stream_index
-    filename = f'batch_{index:03d}.csv'
-    path = os.path.join(config.BATCH_DIR, filename)
-    if not os.path.isfile(path):
-        return jsonify({
-            'status': 'exhausted',
-            'message': f'No batch file at {filename}.',
-        }), 404
+    new_rows, filename, is_batch = _pending_stream_rows()
+    if new_rows is None:
+        return jsonify({'status': 'waiting', 'nextBatch': store.stream_index})
 
-    store.append(pd.read_csv(path))
-    dataset = store.dataset
-
-    # Same auto sentinels as the GET routes: 0/-1 means "derive from the data".
-    n_neighbors = int(payload.get('n_neighbors') or 0)
-    min_dist = float(payload.get('min_dist', -1.0))
-    num_clusters = int(payload.get('num_clusters') or 0)
-
-    dr_results = _dr_payload(n_neighbors, min_dist, num_clusters, False)
+    # The append has to be undoable. It used to be committed before the
+    # recompute ran, so a batch the pipeline could not digest left the store
+    # holding it anyway — every later request then served the corrupted frame,
+    # and the only way back was a restart.
+    previous = store.dataset
+    previous_index = store.stream_index
+    try:
+        store.append(new_rows, advance=is_batch)
+        dataset = store.dataset
+        dr_results = _dr_payload(
+            int(payload.get('n_neighbors') or 0),
+            float(payload.get('min_dist', -1.0)),
+            int(payload.get('num_clusters') or 0),
+            False,
+        )
+    except DataSourceError:
+        raise
+    except Exception as exc:
+        store.restore(previous, previous_index)
+        raise StreamBatchError(
+            f'Could not analyse the new data in {filename}: {exc}. '
+            f'The dataset is unchanged.'
+        )
 
     frame = dataset.frame
     if nodes:
@@ -674,6 +738,8 @@ def stream_next():
         'status': 'success',
         'batch': filename,
         'nextBatch': store.stream_index,
+        # The extent grew, and it is what the timeline and the charts open on.
+        'extent': [_iso_stamp(dataset.start), _iso_stamp(dataset.end)],
         'data': _records(series_frame),
         'dr_results': dr_results,
         'mrdmd_results': mrdmd_results,
@@ -682,14 +748,25 @@ def stream_next():
 
 @app.route('/api/stream/status', methods=['GET'])
 def stream_status():
+    """What the stream can still draw on: prepared batches, and/or the source.
+
+    ``exhausted`` means neither. With a watchable source there is always more to
+    wait for, so it stays false and the client keeps polling.
+    """
     index = store.stream_index
     available = 0
     if os.path.isdir(config.BATCH_DIR):
         available = len([f for f in os.listdir(config.BATCH_DIR) if f.endswith('.csv')])
+
+    dataset = store.dataset if store.is_loaded else None
+    watching = bool(dataset is not None and dataset.path and os.path.isfile(dataset.path))
+
     return jsonify({
         'nextBatch': index,
         'available': available,
-        'exhausted': index >= available,
+        'watchingSource': watching,
+        'source': dataset.name if watching else None,
+        'exhausted': index >= available and not watching,
     })
 
 

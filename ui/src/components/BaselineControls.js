@@ -142,7 +142,7 @@ const BaselineControls = ({ field, baseline, onCommit, onReset, disabled }) => {
                 gridColumn: '1 / -1',
                 fontSize: '12px', fontWeight: 'bold', color: '#333', marginBottom: '2px',
             }}>
-                Baseline Controls
+                Baseline Configuration
             </div>
 
             <Field label="Min">

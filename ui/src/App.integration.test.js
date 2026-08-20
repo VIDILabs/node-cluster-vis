@@ -242,6 +242,93 @@ maybe('App against a live API', () => {
     expect(error).toMatch(/timestamp/);
   });
 
+  test('the stream idles rather than stopping when nothing new has arrived', async () => {
+    const status = await (await fetch(`${API}/api/stream/status`)).json();
+    expect(status).toHaveProperty('nextBatch');
+    expect(status).toHaveProperty('available');
+    expect(status).toHaveProperty('watchingSource');
+    // A file-backed dataset can always be re-read, so the stream never runs
+    // out — there is only "nothing yet".
+    if (status.watchingSource) expect(status.exhausted).toBe(false);
+
+    const active = async () =>
+      (await (await fetch(`${API}/api/datasets`)).json()).active;
+    const rows = async () => (await active()).rows;
+    const before = await rows();
+    const beforeEnd = (await active()).end;
+
+    // Metrics matter: with none the server skips mrDMD entirely and returns no
+    // z-scores, which is correct but tests nothing. The client always sends its
+    // current selection, so the test does too.
+    const metrics = (await active()).metrics.slice(0, 2);
+    const response = await fetch(`${API}/api/stream/next`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ metrics, nodes: [] }),
+    });
+    const payload = await response.json();
+    expect(response.status).toBe(200);
+    expect(['waiting', 'success']).toContain(payload.status);
+
+    if (payload.status === 'waiting') {
+      // Idling must leave the dataset alone. The client relies on this to skip
+      // its state updates, so a poll that quietly mutated anything would flash
+      // every chart once per interval.
+      expect(await rows()).toBe(before);
+      return;
+    }
+
+    // A batch was folded in: the dataset grew, the extent moved, and every
+    // algorithm was re-run over the larger frame. All four have to happen —
+    // rows arriving without a recompute is the failure this whole path exists
+    // to avoid.
+    expect(payload.batch).toBeTruthy();
+    expect(await rows()).toBeGreaterThan(before);
+    expect(new Date(payload.extent[1]).getTime())
+      .toBeGreaterThan(new Date(beforeEnd).getTime());
+    expect(payload.dr_results.node_cluster_map.length).toBeGreaterThan(0);
+    expect(payload.dr_results.feat_contributions.features.length).toBeGreaterThan(0);
+    expect(payload.mrdmd_results.zscores.length).toBeGreaterThan(0);
+  }, 120000);
+
+  test('a streamed batch extends the time domain view', async () => {
+    // The batch payload carries the series, the embedding and the z-scores but
+    // *not* the coverage strip, so the timeline is the one view that only moves
+    // if the client goes and asks for it. It sat frozen on the pre-stream
+    // buckets while every panel beside it advanced.
+    const status = await (await fetch(`${API}/api/stream/status`)).json();
+    // `available` is the *total* batch count, not the remaining one, so a
+    // prepared batch is left only while nextBatch is still short of it. With
+    // the fixture consumed the source is watchable but not growing, so nothing
+    // would ever arrive and there is nothing to assert.
+    if (status.nextBatch >= status.available) return;
+
+    const { container } = render(<App />);
+
+    // The last cell d3 laid down in the first cluster's band. Document order is
+    // the order of `coverage.times`, so this is the latest bucket that had a
+    // node running — read positionally rather than by sorting the titles, whose
+    // `HH:MM` carries no date: the first bucket starts a few minutes before the
+    // dataset does, i.e. on the previous day, and sorts as the maximum.
+    const lastBucket = () => {
+      const band = container.querySelector('g[class^="inbase-c"]');
+      const cells = band?.querySelectorAll('.inbase-cell title');
+      const text = cells?.length ? cells[cells.length - 1].textContent : '';
+      return /\u00b7 (\d{2}:\d{2}) \u00b7/.exec(text)?.[1];
+    };
+
+    await waitFor(() => expect(lastBucket()).toBeTruthy(), { timeout: 60000 });
+    const before = lastBucket();
+
+    fireEvent.click(screen.getByLabelText('Streaming'));
+
+    // The fixture resumes one cadence step after the sample ends and runs two
+    // hours past it, so the last populated bucket has to move forward.
+    await waitFor(() => expect(lastBucket() > before).toBe(true), { timeout: 120000 });
+
+    fireEvent.click(screen.getByLabelText('Streaming'));
+  }, 180000);
+
   test('a metric can be switched off and back on', async () => {
     const { container } = render(<App />);
 

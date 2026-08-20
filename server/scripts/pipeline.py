@@ -127,6 +127,18 @@ def apply_dr_parallel(df, method="PCA"):
 def apply_second_dr(df, method, n_neighbors=15, min_dist=0.1):
     print('Applying DR2 using:', method)
     df_pivot = df.pivot(index="Measurement", columns="Col", values="DR1")
+
+    # A node with no DR1 value for some metric leaves a NaN here, and UMAP
+    # rejects the whole matrix with `Input contains NaN` — a 500 for what is a
+    # perfectly ordinary gap. DR1 is a demeaned, standardized projection, so 0
+    # is that metric's centre: an absent node sits at the middle of the axis it
+    # says nothing about rather than dragging the embedding to an edge.
+    missing = int(df_pivot.isna().sum().sum())
+    if missing:
+        print(f'DR2: {missing} missing DR1 value(s) across '
+              f'{int(df_pivot.isna().any(axis=1).sum())} node(s); centring them')
+        df_pivot = df_pivot.fillna(0.0)
+
     X = df_pivot.values
 
     if (method == "PCA"):

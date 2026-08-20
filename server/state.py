@@ -79,11 +79,47 @@ class DatasetStore:
         )
         return dataset
 
-    def append(self, frame):
-        """Merge a streamed batch into the active dataset."""
+    def append(self, frame, advance=True):
+        """Merge a streamed batch into the active dataset.
+
+        A batch adds **rows**, never columns and never a new population. Both
+        rules are enforced here rather than trusted, because the failure is
+        silent and expensive: appending the raw ganglia export to the anonymized
+        sample produced a 315-node, 46-metric frame spanning two islands 52 days
+        apart, and the 120 original nodes then had no DR1 row for any of the 23
+        metrics they had never carried — so the DR2 pivot was NaN and UMAP threw
+        `Input contains NaN`. Real hostnames also ended up in what is meant to
+        be an anonymized demo.
+
+        Raises `DataSourceError` (422) when the batch describes different nodes
+        entirely, which is the signal that it is not a continuation of this run.
+        """
         normalized = datasource.normalize(frame)
+        node = config.NODE_COLUMN
+
         with self._lock:
             current = self.dataset
+
+            # Columns the dataset does not already have are dropped rather than
+            # merged: a mid-stream schema change would silently re-rank the
+            # metric list and re-fit the embedding on a different feature space.
+            keep = [c for c in normalized.columns if c in current.frame.columns]
+            dropped = [c for c in normalized.columns if c not in keep]
+            normalized = normalized[keep]
+            if dropped:
+                print(f'Stream batch: ignoring {len(dropped)} column(s) not in '
+                      f'the active dataset: {", ".join(dropped[:5])}'
+                      f'{"..." if len(dropped) > 5 else ""}')
+
+            shared = set(normalized[node]) & set(current.frame[node])
+            if not shared:
+                raise datasource.DataSourceError(
+                    f'That batch names {normalized[node].nunique()} node(s), none of '
+                    f'which are in the active dataset. A stream batch has to continue '
+                    f'the same nodes, not introduce a different population.',
+                    status=422,
+                )
+
             combined = pd.concat([current.frame, normalized], ignore_index=True)
             combined = combined.drop_duplicates(
                 subset=[config.NODE_COLUMN, config.TIME_COLUMN], keep='last'
@@ -94,10 +130,26 @@ class DatasetStore:
             self._dataset = datasource.Dataset(
                 current.name, current.source, combined, path=current.path
             )
-            self._stream_index += 1
+            # Only a prepared batch advances the counter. A source tail is not
+            # numbered, and letting it advance meant one tailed append skipped
+            # `batch_000.csv` — the two mechanisms silently consuming one
+            # another's position.
+            if advance:
+                self._stream_index += 1
             # Rows changed, so every cached DR/baseline artifact is stale.
             pipeline.clear_cache()
             return self._dataset
+
+    def restore(self, dataset, stream_index):
+        """Put a previous dataset back after a batch failed to analyse.
+
+        The caches are cleared again on the way out: whatever the failed pass
+        managed to write describes rows that are no longer loaded.
+        """
+        with self._lock:
+            self._dataset = dataset
+            self._stream_index = stream_index
+            pipeline.clear_cache()
 
     # --- cluster label stability -------------------------------------------
     def align_clusters(self, new_df):

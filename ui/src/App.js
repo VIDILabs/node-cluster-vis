@@ -456,17 +456,48 @@ function App() {
         });
         if (cancelled) return;
 
+        // Nothing new at the source yet. Keep polling and leave every view
+        // alone — repainting identical data would flash the charts once a
+        // second for no reason.
+        if (payload.status === 'waiting') {
+          setStreamStatus({ nextBatch: payload.nextBatch, exhausted: false, waiting: true });
+          return;
+        }
+
         setMetricData(buildMetricData(payload.data, selectedDims));
         applyDrPayload(payload.dr_results);
+        const nextBaselines = payload.mrdmd_results?.baselines;
         if (payload.mrdmd_results?.zscores?.length) {
           setzScores(payload.mrdmd_results.zscores);
-          setBaselines(payload.mrdmd_results.baselines);
+          setBaselines(nextBaselines);
         }
-        setStreamStatus({ nextBatch: payload.nextBatch, exhausted: false });
+        // New rows shift the extent, which is what the timeline and the charts
+        // open on; without this the window never moves to cover them.
+        if (payload.extent) setDataExtent(payload.extent);
+        setStreamStatus({ nextBatch: payload.nextBatch, exhausted: false, waiting: false });
+
+        // The timeline and the metric-list sparklines are the two views the
+        // batch payload does *not* carry: coverage is bucketed per cluster and
+        // the averages are grouped by cluster, so both are stale the moment
+        // `applyDrPayload` re-labels the nodes — and neither would extend over
+        // the buckets the new rows just added. The new baselines are passed
+        // explicitly because `setBaselines` has not committed at this point, so
+        // `baselinesStateRef` still holds the previous window (same hazard as
+        // `updateBaseline`).
+        await Promise.all([
+          refreshCoverage(selectedPoints, selectedDims, nextBaselines),
+          refreshClusterAverages(allMetrics),
+        ]);
       } catch (err) {
         if (cancelled) return;
         if (err.status === 404) {
           setStreamStatus({ exhausted: true });
+          setStreamingMode(false);
+        } else if (err.status === 422) {
+          // The batch did not continue this dataset, or the pipeline could not
+          // digest it. The server has rolled back, so stopping here leaves the
+          // views showing exactly what they showed before.
+          setError(`Streaming stopped: ${err.message}`);
           setStreamingMode(false);
         } else {
           console.error(err);
@@ -482,6 +513,7 @@ function App() {
   }, [
     streamingMode, activeDataset, selectedDims, selectedPoints,
     nNeighbors, minDist, numClusters, applyDrPayload, buildMetricData,
+    refreshCoverage, refreshClusterAverages, allMetrics,
   ]);
 
   // --- render -------------------------------------------------------------
@@ -570,6 +602,7 @@ function App() {
                 </Text>
                 <Switch
                   size="small"
+                  aria-label="Streaming"
                   checked={streamingMode}
                   disabled={!activeDataset || streamStatus?.exhausted}
                   onChange={setStreamingMode}
@@ -583,6 +616,7 @@ function App() {
                 </Tooltip>
                 <Switch
                   size="small"
+                  aria-label="Time Domain Scope"
                   checked={timeScoped}
                   loading={rescoping}
                   disabled={!activeDataset}

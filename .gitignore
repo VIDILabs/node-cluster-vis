@@ -9,6 +9,11 @@ ui/.env.local
 server/data/*
 !server/data/sample_metrics.csv
 !server/data/sample_metrics.headers.json
+# The streaming fixture: 12 batches that continue sample_metrics.csv exactly —
+# same 120 anonymized nodes, same 8 metrics, resuming one cadence-step after it
+# ends. Tracked so a fresh clone can exercise streaming without regenerating.
+!server/data/batch/
+!server/data/batch/batch_*.csv
 
 .DS_Store
 
