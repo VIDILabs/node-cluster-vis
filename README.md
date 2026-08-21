@@ -17,7 +17,7 @@ We have included an anonymized sample dataset for exploring the interface withou
 ## Quick start
 
 ```bash
-./start.sh              
+./start.sh
 ```
 
 ## Frontend (React)
@@ -46,12 +46,7 @@ Or `./start.sh --ui-only` from the repository root.
 3. `python -m venv .venv`
 4. `source .venv/bin/activate` (Repeat this whenever you start a new terminal)
 5. `pip install -r requirements.txt`
-6. Install CCPCA package
-
-   1. Options:
-      1. Clone the repo:`git clone https://github.com/takanori-fujiwara/ccpca.git`, follow instructions in the README.md file
-      2. Run `pip install ccpca`
-7. Add data to server/data/
+6. Add data to server/data/
 
    1. See server/data/sample_metrics.csv for format
 

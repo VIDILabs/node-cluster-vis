@@ -16,3 +16,4 @@ scikit-learn==1.6.1
 scipy==1.15.2
 tqdm==4.67.1
 umap-learn==0.5.7
+ccpca==0.2.4
